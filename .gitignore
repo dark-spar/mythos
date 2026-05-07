@@ -1,0 +1,33 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# SQLx offline data is committed; cache is not
+.sqlx-data.json.bak
+
+# Web
+web/node_modules
+web/.svelte-kit
+web/build
+web/dist
+.pnpm-store
+
+# IDE / OS
+.idea
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+
+# Local config / data
+config.local.toml
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+cache/
+media/
+
+# Logs
+*.log

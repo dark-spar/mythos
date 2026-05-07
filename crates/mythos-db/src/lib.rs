@@ -1,0 +1,47 @@
+//! Database access layer: connection pool, migrations, and query helpers.
+
+pub use sqlx::SqlitePool;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
+use std::path::Path;
+use std::str::FromStr;
+
+#[derive(Debug, thiserror::Error)]
+pub enum DbError {
+    #[error("sqlx error: {0}")]
+    Sqlx(#[from] sqlx::Error),
+    #[error("migration error: {0}")]
+    Migrate(#[from] sqlx::migrate::MigrateError),
+}
+
+pub type Result<T> = std::result::Result<T, DbError>;
+
+/// Open a SQLite pool against the given path, applying recommended pragmas
+/// for a self-hosted media server (WAL, NORMAL sync, foreign keys).
+pub async fn open(path: &Path) -> Result<SqlitePool> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).ok();
+    }
+
+    let url = format!("sqlite://{}", path.display());
+    let options = SqliteConnectOptions::from_str(&url)?
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .foreign_keys(true)
+        .busy_timeout(std::time::Duration::from_secs(5));
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(8)
+        .connect_with(options)
+        .await?;
+
+    Ok(pool)
+}
+
+/// Run all embedded migrations against the given pool.
+pub async fn migrate(pool: &SqlitePool) -> Result<()> {
+    sqlx::migrate!("../../migrations").run(pool).await?;
+    Ok(())
+}

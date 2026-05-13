@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { auth } from '$lib/auth.svelte';
+
 	let health = $state<{ status: string; version: string } | null>(null);
 	let error = $state<string | null>(null);
 
@@ -24,8 +26,23 @@
 </svelte:head>
 
 <main class="mx-auto max-w-2xl px-6 py-16">
-	<h1 class="text-4xl font-semibold tracking-tight">Mythos</h1>
-	<p class="mt-3 text-zinc-500">A self-hosted media server, written in Rust.</p>
+	<header class="flex items-baseline justify-between">
+		<div>
+			<h1 class="text-4xl font-semibold tracking-tight">Mythos</h1>
+			<p class="mt-3 text-zinc-500">A self-hosted media server, written in Rust.</p>
+		</div>
+		{#if auth.user}
+			<div class="text-right text-sm">
+				<p class="text-zinc-900 dark:text-zinc-100">{auth.user.username}</p>
+				<button
+					class="mt-1 text-zinc-500 underline-offset-2 hover:text-zinc-900 hover:underline dark:hover:text-zinc-100"
+					onclick={() => auth.logout()}
+				>
+					Sign out
+				</button>
+			</div>
+		{/if}
+	</header>
 
 	<section class="mt-10 rounded-lg border border-zinc-200 p-5 dark:border-zinc-800">
 		<h2 class="text-sm font-medium tracking-wide text-zinc-500 uppercase">Server</h2>

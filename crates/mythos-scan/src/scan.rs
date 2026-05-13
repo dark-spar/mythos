@@ -83,6 +83,14 @@ pub async fn scan_library(
             }
         };
 
+        let identity = identify(&relative);
+        info!(
+            file = %relative.display(),
+            title = %identity.title,
+            year = ?identity.year,
+            "identified"
+        );
+
         let (size_bytes, mtime) = match file_stats(&absolute).await {
             Ok(s) => s,
             Err(err) => {
@@ -94,7 +102,17 @@ pub async fn scan_library(
         };
 
         let probe_data = match probe(&absolute).await {
-            Ok(p) => p,
+            Ok(p) => {
+                info!(
+                    title = %identity.title,
+                    container = p.container.as_deref().unwrap_or("?"),
+                    video = p.video_codec.as_deref().unwrap_or("?"),
+                    audio = p.audio_codec.as_deref().unwrap_or("?"),
+                    duration_seconds = p.duration_seconds.unwrap_or(0.0),
+                    "probed"
+                );
+                p
+            }
             Err(err) => {
                 warn!(
                     error = %err,
@@ -130,7 +148,11 @@ pub async fn scan_library(
             seen_paths.push(p.to_string());
         }
 
-        let identity = identify(&relative);
+        // Clone the title before moving identity into NewMovie so we
+        // can still reference it in the post-upsert log line.
+        let title_for_log = identity.title.clone();
+        let year_for_log = identity.year;
+
         if let Err(err) = movies_repo
             .upsert(NewMovie {
                 library_id: library.id,
@@ -145,6 +167,14 @@ pub async fn scan_library(
                 .push(format!("upsert movie {}: {err}", relative.display()));
             continue;
         }
+
+        let action = if inserted { "added" } else { "updated" };
+        info!(
+            title = %title_for_log,
+            year = ?year_for_log,
+            action,
+            "indexed"
+        );
 
         if inserted {
             report.added += 1;
@@ -194,10 +224,18 @@ async fn enrich_pass(
         }
     };
 
+    info!(pending = pending.len(), "tmdb enrichment pass starting");
+
     for movie in pending {
         let search = match tmdb.search_movie(&movie.title, movie.year).await {
             Ok(v) => v,
             Err(err) => {
+                warn!(
+                    error = %err,
+                    title = %movie.title,
+                    year = ?movie.year,
+                    "tmdb search failed"
+                );
                 report
                     .errors
                     .push(format!("tmdb search {}: {err}", movie.title));
@@ -205,8 +243,22 @@ async fn enrich_pass(
             }
         };
         let Some(matched) = search else {
+            info!(
+                title = %movie.title,
+                year = ?movie.year,
+                "tmdb: no match"
+            );
             continue;
         };
+
+        info!(
+            title = %movie.title,
+            tmdb_id = matched.tmdb_id,
+            tmdb_title = %matched.title,
+            tmdb_year = ?matched.release_year,
+            has_poster = matched.poster_path.is_some(),
+            "tmdb: matched"
+        );
 
         let poster_url = match matched.poster_path.as_deref() {
             Some(path) => match tmdb.download_poster(path, &movie.id.to_string()).await {

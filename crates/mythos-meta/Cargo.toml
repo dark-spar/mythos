@@ -17,3 +17,9 @@ thiserror.workspace = true
 tokio.workspace = true
 url.workspace = true
 chrono.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+axum.workspace = true

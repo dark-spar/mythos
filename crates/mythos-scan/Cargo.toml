@@ -10,6 +10,7 @@ description = "Filesystem scanner and identifier for Mythos"
 [dependencies]
 mythos-core.workspace = true
 mythos-db.workspace = true
+mythos-meta.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -25,3 +26,5 @@ sqlx.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+axum.workspace = true
+serde_json.workspace = true

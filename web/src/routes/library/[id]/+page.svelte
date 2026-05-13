@@ -86,11 +86,20 @@
 				{#each movies as movie (movie.id)}
 					<li>
 						<a href={resolve(`/movie/${movie.id}`)} class="block transition hover:opacity-80">
-							<div
-								class="flex aspect-[2/3] items-center justify-center rounded bg-zinc-100 p-3 text-center text-xs text-zinc-400 dark:bg-zinc-900"
-							>
-								<span class="line-clamp-3 font-medium">{movie.title}</span>
-							</div>
+							{#if movie.poster_url}
+								<img
+									src={movie.poster_url}
+									alt="{movie.title} poster"
+									loading="lazy"
+									class="aspect-[2/3] w-full rounded bg-zinc-100 object-cover dark:bg-zinc-900"
+								/>
+							{:else}
+								<div
+									class="flex aspect-[2/3] items-center justify-center rounded bg-zinc-100 p-3 text-center text-xs text-zinc-400 dark:bg-zinc-900"
+								>
+									<span class="line-clamp-3 font-medium">{movie.title}</span>
+								</div>
+							{/if}
 							<p
 								class="mt-2 truncate text-sm font-medium text-zinc-900 dark:text-zinc-100"
 								title={movie.title}

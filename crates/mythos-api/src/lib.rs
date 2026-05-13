@@ -6,12 +6,16 @@ pub mod library;
 pub mod movie;
 pub mod scan;
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use axum::extract::FromRef;
 use axum::{
     Json, Router,
     routing::{get, post},
 };
 use mythos_auth::TokenConfig;
+use mythos_meta::TmdbClient;
 use serde::Serialize;
 use sqlx::SqlitePool;
 
@@ -23,12 +27,25 @@ pub struct CookieConfig {
     pub secure: bool,
 }
 
+/// Directory where TMDb-downloaded poster JPEGs live. Wrapped in a
+/// newtype so [`axum::extract::FromRef`] can pick it out of `ApiState`
+/// without colliding with other `PathBuf` state.
+#[derive(Clone, Debug)]
+pub struct PostersDir(pub PathBuf);
+
+/// Optional TMDb client. `None` means no API key was configured and the
+/// scanner skips enrichment.
+#[derive(Clone, Default)]
+pub struct TmdbHandle(pub Option<Arc<TmdbClient>>);
+
 #[derive(Clone, FromRef)]
 pub struct ApiState {
     pub db: SqlitePool,
     pub token: TokenConfig,
     pub cookies: CookieConfig,
     pub scans: ScanTracker,
+    pub tmdb: TmdbHandle,
+    pub posters_dir: PostersDir,
 }
 
 #[derive(Debug, Serialize)]
@@ -56,6 +73,7 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/api/libraries/{id}/movies", get(movie::list))
         .route("/api/movies/{id}", get(movie::get_one))
+        .route("/api/movies/{id}/poster", get(movie::poster))
         .with_state(state)
 }
 

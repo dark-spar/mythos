@@ -7,7 +7,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
-use mythos_api::{ApiState, CookieConfig, ScanTracker};
+use mythos_api::{ApiState, CookieConfig, PostersDir, ScanTracker, TmdbHandle};
 use mythos_auth::{TokenConfig, token};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
@@ -27,6 +27,8 @@ async fn setup() -> (Router, SqlitePool) {
         token,
         cookies,
         scans: ScanTracker::new(),
+        tmdb: TmdbHandle::default(),
+        posters_dir: PostersDir(std::env::temp_dir()),
     });
     (router, pool)
 }

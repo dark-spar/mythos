@@ -18,6 +18,10 @@ pub struct Config {
     /// Lifetime of issued JWTs, in days.
     #[serde(default = "default_token_ttl_days")]
     pub token_ttl_days: u64,
+    /// TMDb v3 API key. None disables metadata enrichment — scans still
+    /// index files, just without titles/posters/overviews.
+    #[serde(default)]
+    pub tmdb_api_key: Option<String>,
 }
 
 fn default_cookie_secure() -> bool {
@@ -36,6 +40,7 @@ impl Default for Config {
             log_filter: "info,mythos=debug,sqlx=warn".to_string(),
             cookie_secure: default_cookie_secure(),
             token_ttl_days: default_token_ttl_days(),
+            tmdb_api_key: None,
         }
     }
 }
@@ -62,5 +67,9 @@ impl Config {
 
     pub fn db_path(&self) -> PathBuf {
         self.data_dir.join("mythos.db")
+    }
+
+    pub fn posters_dir(&self) -> PathBuf {
+        self.data_dir.join("posters")
     }
 }

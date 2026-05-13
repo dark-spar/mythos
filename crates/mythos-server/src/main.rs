@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use axum::Router;
-use mythos_api::{CookieConfig, ScanTracker};
+use mythos_api::{CookieConfig, PostersDir, ScanTracker, TmdbHandle};
 use mythos_auth::TokenConfig;
+use mythos_meta::{TmdbClient, TmdbConfig};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,7 +47,30 @@ async fn main() -> Result<()> {
         secure: cfg.cookie_secure,
     };
 
-    let app = build_app(pool, token, cookies);
+    let posters_dir = cfg.posters_dir();
+    std::fs::create_dir_all(&posters_dir)
+        .with_context(|| format!("creating posters dir at {}", posters_dir.display()))?;
+
+    let tmdb = match cfg
+        .tmdb_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(key) => {
+            info!("TMDb enrichment enabled");
+            TmdbHandle(Some(Arc::new(TmdbClient::new(TmdbConfig::new(
+                key.to_string(),
+                posters_dir.clone(),
+            )))))
+        }
+        None => {
+            info!("MYTHOS_TMDB_API_KEY not set; metadata enrichment disabled");
+            TmdbHandle::default()
+        }
+    };
+
+    let app = build_app(pool, token, cookies, tmdb, PostersDir(posters_dir));
 
     let listener = TcpListener::bind(cfg.listen)
         .await
@@ -66,12 +90,20 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn build_app(db: mythos_db::SqlitePool, token: TokenConfig, cookies: CookieConfig) -> Router {
+fn build_app(
+    db: mythos_db::SqlitePool,
+    token: TokenConfig,
+    cookies: CookieConfig,
+    tmdb: TmdbHandle,
+    posters_dir: PostersDir,
+) -> Router {
     let api = mythos_api::router(mythos_api::ApiState {
         db,
         token,
         cookies,
         scans: ScanTracker::new(),
+        tmdb,
+        posters_dir,
     });
     Router::new()
         .merge(api)

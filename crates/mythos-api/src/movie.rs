@@ -1,12 +1,13 @@
-//! `/api/libraries/:id/movies` and `/api/movies/:id`.
+//! `/api/libraries/:id/movies`, `/api/movies/:id`, `/api/movies/:id/poster`.
 //!
-//! Read-only browse surface used by the SPA grid + detail pages. Both
-//! endpoints are auth-only (not admin-only) — anyone with an account
-//! can see what's in the library.
+//! Read-only browse surface used by the SPA grid + detail pages. All
+//! three are auth-only (not admin-only) — anyone with an account can
+//! see what's in the library.
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use mythos_auth::AuthUser;
 use mythos_core::{MediaFile, Movie};
 use mythos_db::{MediaFileRepo, MovieRepo};
@@ -14,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::PostersDir;
 use crate::error::{ApiError, ApiResult};
 
 const DEFAULT_LIMIT: i64 = 60;
@@ -83,4 +85,35 @@ pub async fn get_one(
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "file_missing"))?;
 
     Ok(Json(MovieDetail { movie, file }))
+}
+
+pub async fn poster(
+    State(posters): State<PostersDir>,
+    _user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Response> {
+    let path = posters.0.join(format!("{id}.jpg"));
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => {
+            let mut res = (StatusCode::OK, bytes).into_response();
+            res.headers_mut()
+                .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg"));
+            // Poster content for a given movie id is stable until the
+            // next scan replaces the file. Long-ish browser cache is
+            // safe; the URL ends with the movie's UUID so different
+            // movies never collide.
+            res.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=3600"),
+            );
+            Ok(res)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Err(ApiError::new(StatusCode::NOT_FOUND, "not_found"))
+        }
+        Err(err) => {
+            tracing::error!(?err, path = %path.display(), "failed to read poster");
+            Err(ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal"))
+        }
+    }
 }

@@ -17,6 +17,7 @@ mythos-core.workspace = true
 mythos-db.workspace = true
 mythos-api.workspace = true
 mythos-auth.workspace = true
+mythos-meta.workspace = true
 
 axum.workspace = true
 tower.workspace = true

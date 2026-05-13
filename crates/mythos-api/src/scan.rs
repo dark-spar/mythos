@@ -15,6 +15,8 @@ use chrono::{DateTime, Utc};
 use mythos_auth::{AdminUser, AuthUser};
 use mythos_db::LibraryRepo;
 use mythos_scan::ScanReport;
+
+use crate::TmdbHandle;
 use serde::Serialize;
 use sqlx::SqlitePool;
 use tokio::sync::RwLock;
@@ -36,6 +38,7 @@ pub enum ScanState {
         added: u32,
         updated: u32,
         removed: u64,
+        enriched: u32,
         errors: Vec<String>,
         duration_ms: u64,
     },
@@ -83,6 +86,7 @@ impl ScanTracker {
                 added: report.added,
                 updated: report.updated,
                 removed: report.removed,
+                enriched: report.enriched,
                 errors: report.errors,
                 duration_ms: report.duration_ms,
             },
@@ -93,6 +97,7 @@ impl ScanTracker {
 pub async fn start(
     State(pool): State<SqlitePool>,
     State(tracker): State<ScanTracker>,
+    State(tmdb): State<TmdbHandle>,
     _user: AdminUser,
     Path(library_id): Path<Uuid>,
 ) -> ApiResult<(StatusCode, Json<ScanState>)> {
@@ -111,8 +116,10 @@ pub async fn start(
 
     let tracker_for_task = tracker.clone();
     let pool_for_task = pool.clone();
+    let tmdb_for_task = tmdb.0.clone();
     tokio::spawn(async move {
-        let report = mythos_scan::scan_library(&pool_for_task, &library).await;
+        let report =
+            mythos_scan::scan_library(&pool_for_task, &library, tmdb_for_task.as_deref()).await;
         if !report.errors.is_empty() {
             warn!(
                 library = %library.name,

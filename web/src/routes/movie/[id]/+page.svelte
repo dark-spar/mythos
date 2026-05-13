@@ -65,22 +65,31 @@
 	{:else if error}
 		<p class="mt-8 font-mono text-rose-500">{error}</p>
 	{:else if detail}
-		<header class="mt-4">
-			<h1 class="text-3xl font-semibold tracking-tight">{detail.movie.title}</h1>
-			{#if detail.movie.year != null}
-				<p class="mt-1 text-zinc-500">{detail.movie.year}</p>
+		<div class="mt-4 flex flex-col gap-6 sm:flex-row sm:items-start">
+			{#if detail.movie.poster_url}
+				<img
+					src={detail.movie.poster_url}
+					alt="{detail.movie.title} poster"
+					class="w-40 shrink-0 rounded shadow-sm sm:w-48"
+				/>
 			{/if}
-		</header>
+			<div class="min-w-0">
+				<h1 class="text-3xl font-semibold tracking-tight">{detail.movie.title}</h1>
+				{#if detail.movie.year != null}
+					<p class="mt-1 text-zinc-500">{detail.movie.year}</p>
+				{/if}
 
-		{#if detail.movie.overview}
-			<p class="mt-6 leading-relaxed text-zinc-700 dark:text-zinc-300">
-				{detail.movie.overview}
-			</p>
-		{:else}
-			<p class="mt-6 text-sm text-zinc-400 italic">
-				No description yet. TMDb enrichment lands in the next phase.
-			</p>
-		{/if}
+				{#if detail.movie.overview}
+					<p class="mt-4 leading-relaxed text-zinc-700 dark:text-zinc-300">
+						{detail.movie.overview}
+					</p>
+				{:else}
+					<p class="mt-4 text-sm text-zinc-400 italic">
+						No description on file. Configure a TMDb API key and rescan to enrich.
+					</p>
+				{/if}
+			</div>
+		</div>
 
 		<section class="mt-10 rounded-lg border border-zinc-200 p-5 dark:border-zinc-800">
 			<h2 class="text-sm font-medium tracking-wide text-zinc-500 uppercase">File</h2>

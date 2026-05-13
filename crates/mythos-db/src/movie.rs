@@ -131,4 +131,71 @@ impl MovieRepo {
             .await?;
         Ok(n)
     }
+
+    /// Movies in this library that haven't been TMDb-matched yet.
+    /// Returns just the id + title + year for the scanner; the
+    /// enrichment pass doesn't need the rest.
+    pub async fn list_unenriched_by_library(
+        &self,
+        library_id: Uuid,
+    ) -> Result<Vec<UnenrichedMovie>> {
+        let rows: Vec<UnenrichedRow> = sqlx::query_as(
+            "SELECT id, title, year FROM movies \
+             WHERE library_id = ? AND tmdb_id IS NULL",
+        )
+        .bind(library_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|r| {
+                Ok(UnenrichedMovie {
+                    id: Uuid::parse_str(&r.id)
+                        .map_err(|err| DbError::Decode(format!("invalid movie id: {err}")))?,
+                    title: r.title,
+                    year: r.year,
+                })
+            })
+            .collect()
+    }
+
+    /// Apply TMDb metadata to a movie row. Bumps `updated_at`. Caller
+    /// supplies the local poster URL (already downloaded) so this
+    /// function does no I/O outside the DB.
+    pub async fn apply_tmdb(
+        &self,
+        movie_id: Uuid,
+        tmdb_id: i64,
+        overview: Option<&str>,
+        poster_url: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE movies SET \
+               tmdb_id    = ?, \
+               overview   = ?, \
+               poster_url = ?, \
+               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE id = ?",
+        )
+        .bind(tmdb_id)
+        .bind(overview)
+        .bind(poster_url)
+        .bind(movie_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UnenrichedMovie {
+    pub id: Uuid,
+    pub title: String,
+    pub year: Option<i64>,
+}
+
+#[derive(sqlx::FromRow)]
+struct UnenrichedRow {
+    id: String,
+    title: String,
+    year: Option<i64>,
 }

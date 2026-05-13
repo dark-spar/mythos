@@ -1,5 +1,5 @@
-//! Library scan orchestrator: walk → identify → probe → upsert, then
-//! prune anything not touched.
+//! Library scan orchestrator: walk → identify → probe → upsert →
+//! optional TMDb enrichment, then prune anything not touched.
 //!
 //! For movies-kind libraries we identify and upsert a movie row per
 //! file. Non-movies libraries are no-ops in Phase 1c (file rows are not
@@ -11,12 +11,20 @@
 //! associated movies. Path-based pruning (rather than timestamp-based)
 //! is robust to wall-clock precision and removes a subtle race in
 //! back-to-back scans.
+//!
+//! Enrichment is idempotent: only movies with NULL `tmdb_id` are
+//! contacted, so re-running a scan after enabling TMDb fills in
+//! anything that was indexed earlier without re-fetching what's already
+//! enriched. Search failures and poster download failures are logged
+//! and accumulated into `ScanReport::errors`; they do not abort the
+//! scan.
 
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use mythos_core::{Library, LibraryKind, NewMediaFile, NewMovie, Probe};
 use mythos_db::{MediaFileRepo, MovieRepo};
+use mythos_meta::TmdbClient;
 use serde::Serialize;
 use sqlx::SqlitePool;
 use tracing::{info, warn};
@@ -30,11 +38,16 @@ pub struct ScanReport {
     pub added: u32,
     pub updated: u32,
     pub removed: u64,
+    pub enriched: u32,
     pub errors: Vec<String>,
     pub duration_ms: u64,
 }
 
-pub async fn scan_library(pool: &SqlitePool, library: &Library) -> ScanReport {
+pub async fn scan_library(
+    pool: &SqlitePool,
+    library: &Library,
+    tmdb: Option<&TmdbClient>,
+) -> ScanReport {
     let started = Instant::now();
     let mut report = ScanReport::default();
     let mut seen_paths: Vec<String> = Vec::new();
@@ -148,18 +161,84 @@ pub async fn scan_library(pool: &SqlitePool, library: &Library) -> ScanReport {
         }
     };
 
+    if let Some(client) = tmdb {
+        enrich_pass(&movies_repo, library.id, client, &mut report).await;
+    }
+
     report.duration_ms = started.elapsed().as_millis() as u64;
     info!(
         library = %library.name,
         added = report.added,
         updated = report.updated,
         removed = report.removed,
+        enriched = report.enriched,
         errors = report.errors.len(),
         duration_ms = report.duration_ms,
         "scan complete"
     );
 
     report
+}
+
+async fn enrich_pass(
+    movies: &MovieRepo,
+    library_id: uuid::Uuid,
+    tmdb: &TmdbClient,
+    report: &mut ScanReport,
+) {
+    let pending = match movies.list_unenriched_by_library(library_id).await {
+        Ok(v) => v,
+        Err(err) => {
+            report.errors.push(format!("list unenriched: {err}"));
+            return;
+        }
+    };
+
+    for movie in pending {
+        let search = match tmdb.search_movie(&movie.title, movie.year).await {
+            Ok(v) => v,
+            Err(err) => {
+                report
+                    .errors
+                    .push(format!("tmdb search {}: {err}", movie.title));
+                continue;
+            }
+        };
+        let Some(matched) = search else {
+            continue;
+        };
+
+        let poster_url = match matched.poster_path.as_deref() {
+            Some(path) => match tmdb.download_poster(path, &movie.id.to_string()).await {
+                Ok(_) => Some(format!("/api/movies/{}/poster", movie.id)),
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        movie = %movie.title,
+                        "poster download failed; persisting metadata without poster"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+
+        if let Err(err) = movies
+            .apply_tmdb(
+                movie.id,
+                matched.tmdb_id,
+                matched.overview.as_deref(),
+                poster_url.as_deref(),
+            )
+            .await
+        {
+            report
+                .errors
+                .push(format!("apply tmdb {}: {err}", movie.title));
+            continue;
+        }
+        report.enriched += 1;
+    }
 }
 
 async fn file_stats(path: &std::path::Path) -> std::io::Result<(i64, DateTime<Utc>)> {

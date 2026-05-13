@@ -1,5 +1,13 @@
-//! Streaming pipeline. Direct play arrives in Phase 2, HLS in Phase 4.
+//! Streaming pipeline.
+//!
+//! Phase 2 served direct-play byte ranges out of `mythos-api`. This
+//! crate owns the Phase 4 piece: spawning `ffmpeg` to transcode files
+//! the browser can't handle natively (HEVC, AC-3/DTS audio, MKV
+//! container, etc.) into HLS segments served back through the API.
 
-pub fn placeholder() -> &'static str {
-    "mythos-stream"
-}
+pub mod transcode;
+
+pub use transcode::{
+    SEGMENT_DURATION_SECS, SEGMENT_WAIT_TIMEOUT, SessionKey, TranscodeError, TranscodeManager,
+    TranscodeSession, build_vod_playlist, parse_segment_filename, wait_for_file,
+};

@@ -72,4 +72,8 @@ impl Config {
     pub fn posters_dir(&self) -> PathBuf {
         self.data_dir.join("posters")
     }
+
+    pub fn transcode_dir(&self) -> PathBuf {
+        self.data_dir.join("transcode")
+    }
 }

@@ -1364,6 +1364,7 @@ dependencies = [
  "mythos-db",
  "mythos-meta",
  "mythos-scan",
+ "mythos-stream",
  "serde",
  "serde_json",
  "sqlx",
@@ -1476,6 +1477,7 @@ dependencies = [
  "mythos-core",
  "mythos-db",
  "mythos-meta",
+ "mythos-stream",
  "rand_core 0.6.4",
  "rust-embed",
  "serde",
@@ -1495,10 +1497,12 @@ dependencies = [
  "mythos-core",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tower-http",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

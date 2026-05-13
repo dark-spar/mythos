@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use axum::Router;
-use mythos_api::{CookieConfig, PostersDir, ScanTracker, TmdbHandle};
+use mythos_api::{CookieConfig, HlsHandle, PostersDir, ScanTracker, TmdbHandle};
 use mythos_auth::TokenConfig;
 use mythos_meta::{TmdbClient, TmdbConfig};
+use mythos_stream::TranscodeManager;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,6 +52,34 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&posters_dir)
         .with_context(|| format!("creating posters dir at {}", posters_dir.display()))?;
 
+    let transcode_dir = cfg.transcode_dir();
+    std::fs::create_dir_all(&transcode_dir)
+        .with_context(|| format!("creating transcode dir at {}", transcode_dir.display()))?;
+    // Wipe leftovers from a prior run — segments from a crashed/killed
+    // session are dead weight, and stale playlists confuse hls.js.
+    if let Ok(entries) = std::fs::read_dir(&transcode_dir) {
+        for entry in entries.flatten() {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+    let hls = HlsHandle(Some(TranscodeManager::new(transcode_dir)));
+
+    // Periodic reaper for idle transcode sessions. Runs every minute,
+    // kills any session with no segment-request activity in 5 minutes.
+    if let Some(manager) = hls.0.clone() {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let reaped = manager.reap_idle().await;
+                if reaped > 0 {
+                    info!(reaped, "transcode sessions reaped");
+                }
+            }
+        });
+    }
+
     let tmdb = match cfg
         .tmdb_api_key
         .as_deref()
@@ -70,7 +99,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    let app = build_app(pool, token, cookies, tmdb, PostersDir(posters_dir));
+    let app = build_app(pool, token, cookies, tmdb, PostersDir(posters_dir), hls);
 
     let listener = TcpListener::bind(cfg.listen)
         .await
@@ -96,6 +125,7 @@ fn build_app(
     cookies: CookieConfig,
     tmdb: TmdbHandle,
     posters_dir: PostersDir,
+    hls: HlsHandle,
 ) -> Router {
     let api = mythos_api::router(mythos_api::ApiState {
         db,
@@ -104,6 +134,7 @@ fn build_app(
         scans: ScanTracker::new(),
         tmdb,
         posters_dir,
+        hls,
     });
     Router::new()
         .merge(api)

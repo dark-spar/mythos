@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import Hls from 'hls.js';
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import { ApiError } from '$lib/api';
@@ -24,9 +25,9 @@
 	let lastSavedAt = 0;
 	let saveError = $state<string | null>(null);
 
-	/// How often during normal playback to write progress to the server.
-	/// Pause / visibility-hidden / unload force an immediate write
-	/// regardless of this interval.
+	let usingHls = $state(false);
+	let hls: Hls | null = null;
+
 	const SAVE_INTERVAL_MS = 10_000;
 
 	const id = $derived(page.params.id as string);
@@ -59,10 +60,67 @@
 		})();
 	});
 
+	// Attach a player implementation once both the <video> element and
+	// the movie metadata are ready. Re-runs (and cleans up) when either
+	// changes — navigating between movies, etc.
+	$effect(() => {
+		if (!videoEl || !detail) return;
+		attachPlayer(videoEl, detail);
+		return () => detachPlayer();
+	});
+
+	function attachPlayer(el: HTMLVideoElement, d: MovieDetail) {
+		const issues = browserCompatIssues(d.file);
+		if (issues.length === 0) {
+			// Direct play: range-served raw file. The native <video>
+			// element handles seeking by issuing fresh Range requests.
+			usingHls = false;
+			el.src = `/api/movies/${d.movie.id}/stream`;
+			return;
+		}
+
+		// HLS fallback. The playlist describes the full movie up front
+		// (synthetic VOD), so seeking and resume work via the standard
+		// `currentTime = X` path — the server starts/restarts the
+		// transcoder as the player requests new segments.
+		usingHls = true;
+		const playlistUrl = `/api/movies/${d.movie.id}/hls/playlist.m3u8`;
+
+		if (el.canPlayType('application/vnd.apple.mpegurl')) {
+			// Safari has native HLS support — let it do its thing.
+			el.src = playlistUrl;
+			return;
+		}
+
+		if (Hls.isSupported()) {
+			hls = new Hls({
+				enableWorker: true,
+				lowLatencyMode: false
+			});
+			hls.loadSource(playlistUrl);
+			hls.attachMedia(el);
+			return;
+		}
+
+		saveError = "Your browser has no HLS support — can't play this file.";
+	}
+
+	function detachPlayer() {
+		if (hls) {
+			hls.destroy();
+			hls = null;
+		}
+		if (videoEl) {
+			videoEl.removeAttribute('src');
+			videoEl.load();
+		}
+	}
+
 	function handleLoadedMetadata() {
 		if (videoEl && initialPosition != null && !Number.isNaN(videoEl.duration)) {
-			// Don't auto-resume past the end. 5s margin so refreshes near
-			// the credits don't reset to the start.
+			// Both transports now use absolute time on the <video> element
+			// (HLS playlist is synthetic VOD describing the full movie),
+			// so seek to the saved position once metadata is available.
 			const target = Math.min(initialPosition, Math.max(0, videoEl.duration - 5));
 			if (target > 0) {
 				videoEl.currentTime = target;
@@ -70,11 +128,26 @@
 		}
 	}
 
+	function absolutePositionSeconds(): number | null {
+		if (!videoEl || !Number.isFinite(videoEl.currentTime)) return null;
+		return videoEl.currentTime;
+	}
+
+	function fullDurationSeconds(): number | null {
+		if (detail?.file.duration_seconds && detail.file.duration_seconds > 0) {
+			return detail.file.duration_seconds;
+		}
+		if (videoEl && Number.isFinite(videoEl.duration) && videoEl.duration > 0) {
+			return videoEl.duration;
+		}
+		return null;
+	}
+
 	async function saveNow(reason: string) {
-		if (!detail || !videoEl) return;
-		const pos = videoEl.currentTime;
-		const dur = videoEl.duration;
-		if (!Number.isFinite(pos) || !Number.isFinite(dur) || dur <= 0) return;
+		if (!detail) return;
+		const pos = absolutePositionSeconds();
+		const dur = fullDurationSeconds();
+		if (pos == null || dur == null || pos < 0 || dur <= 0) return;
 		lastSavedAt = Date.now();
 		try {
 			await putProgress(detail.movie.id, pos, dur);
@@ -98,12 +171,9 @@
 	function handleVisibilityChange() {
 		if (!detail || !videoEl) return;
 		if (document.hidden && !videoEl.paused) {
-			// Tab/window hidden during playback: write via keepalive
-			// because the page may be backgrounded or terminated before a
-			// regular fetch would complete.
-			const pos = videoEl.currentTime;
-			const dur = videoEl.duration;
-			if (Number.isFinite(pos) && Number.isFinite(dur) && dur > 0) {
+			const pos = absolutePositionSeconds();
+			const dur = fullDurationSeconds();
+			if (pos != null && dur != null && pos >= 0 && dur > 0) {
 				sendProgressBeacon(detail.movie.id, pos, dur);
 				lastSavedAt = Date.now();
 			}
@@ -112,9 +182,9 @@
 
 	function handleBeforeUnload() {
 		if (!detail || !videoEl) return;
-		const pos = videoEl.currentTime;
-		const dur = videoEl.duration;
-		if (Number.isFinite(pos) && Number.isFinite(dur) && dur > 0) {
+		const pos = absolutePositionSeconds();
+		const dur = fullDurationSeconds();
+		if (pos != null && dur != null && pos >= 0 && dur > 0) {
 			sendProgressBeacon(detail.movie.id, pos, dur);
 		}
 	}
@@ -130,7 +200,6 @@
 
 	function handleKeydown(event: KeyboardEvent) {
 		if (!videoEl) return;
-		// Don't steal keys from form inputs.
 		const target = event.target as HTMLElement | null;
 		if (
 			target &&
@@ -218,38 +287,50 @@
 		<p class="mt-8 font-mono text-rose-500">{error}</p>
 	{:else if detail}
 		<section class="mt-4 overflow-hidden rounded-lg bg-black">
-			<!-- svelte-ignore a11y_media_has_caption -->
 			<!-- Subtitle / caption tracks are a Phase 3+ feature; user-supplied
 			     media has no guaranteed caption source. -->
 			<video
 				bind:this={videoEl}
 				controls
 				preload="metadata"
-				src={`/api/movies/${detail.movie.id}/stream`}
 				class="aspect-video w-full"
 				onloadedmetadata={handleLoadedMetadata}
 				ontimeupdate={handleTimeUpdate}
 				onpause={handlePause}
 			>
-				Your browser can't play this file directly. HLS transcoding lands in Phase 4.
+				Your browser can't play this file directly.
 			</video>
 		</section>
 		{#if compatIssues.length > 0}
-			<div
-				class="mt-2 rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200"
-				role="status"
-			>
-				<p>
-					Your browser may not be able to play this file natively. Video plays but audio is silent?
-					Most likely:
-				</p>
-				<ul class="mt-1 ml-4 list-disc">
-					{#each compatIssues as issue (issue.kind)}
-						<li><span class="font-mono">{issueLabel(issue)}</span></li>
-					{/each}
-				</ul>
-				<p class="mt-2">HLS transcoding (Phase 4) will fix this.</p>
-			</div>
+			{#if usingHls}
+				<div
+					class="mt-2 rounded border border-sky-300 bg-sky-50 p-3 text-xs text-sky-900 dark:border-sky-700 dark:bg-sky-950 dark:text-sky-200"
+					role="status"
+				>
+					<p>Transcoding this file on the fly because your browser can't decode it natively:</p>
+					<ul class="mt-1 ml-4 list-disc">
+						{#each compatIssues as issue (issue.kind)}
+							<li><span class="font-mono">{issueLabel(issue)}</span></li>
+						{/each}
+					</ul>
+					<p class="mt-2">
+						First few seconds may take a moment as ffmpeg spins up. Big seeks restart the
+						transcoder, so they pause briefly before resuming at the new spot.
+					</p>
+				</div>
+			{:else}
+				<div
+					class="mt-2 rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200"
+					role="status"
+				>
+					<p>Your browser has no HLS support, and this file's codecs aren't natively playable:</p>
+					<ul class="mt-1 ml-4 list-disc">
+						{#each compatIssues as issue (issue.kind)}
+							<li><span class="font-mono">{issueLabel(issue)}</span></li>
+						{/each}
+					</ul>
+				</div>
+			{/if}
 		{/if}
 		{#if saveError}
 			<p class="mt-2 text-xs text-rose-500">{saveError}</p>

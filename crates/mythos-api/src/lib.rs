@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod error;
+pub mod hls;
 pub mod library;
 pub mod movie;
 pub mod scan;
@@ -20,6 +21,7 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 
 pub use error::{ApiError, ApiResult};
+pub use hls::HlsHandle;
 pub use scan::ScanTracker;
 
 #[derive(Clone, Debug)]
@@ -46,6 +48,7 @@ pub struct ApiState {
     pub scans: ScanTracker,
     pub tmdb: TmdbHandle,
     pub posters_dir: PostersDir,
+    pub hls: HlsHandle,
 }
 
 #[derive(Debug, Serialize)]
@@ -75,6 +78,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/movies/{id}", get(movie::get_one))
         .route("/api/movies/{id}/poster", get(movie::poster))
         .route("/api/movies/{id}/stream", get(movie::stream))
+        .route("/api/movies/{id}/hls/{filename}", get(hls::hls))
         .route(
             "/api/movies/{id}/progress",
             axum::routing::put(movie::put_progress),

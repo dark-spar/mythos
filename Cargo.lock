@@ -1345,6 +1345,7 @@ dependencies = [
  "mythos-auth",
  "mythos-core",
  "mythos-db",
+ "mythos-scan",
  "serde",
  "serde_json",
  "sqlx",
@@ -1419,6 +1420,7 @@ dependencies = [
 name = "mythos-scan"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "jwalk",
  "mythos-core",
  "mythos-db",
@@ -1426,9 +1428,12 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sqlx",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
  "walkdir",
 ]
 

@@ -3,6 +3,8 @@
 pub mod auth;
 pub mod error;
 pub mod library;
+pub mod movie;
+pub mod scan;
 
 use axum::extract::FromRef;
 use axum::{
@@ -14,6 +16,7 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 
 pub use error::{ApiError, ApiResult};
+pub use scan::ScanTracker;
 
 #[derive(Clone, Debug)]
 pub struct CookieConfig {
@@ -25,6 +28,7 @@ pub struct ApiState {
     pub db: SqlitePool,
     pub token: TokenConfig,
     pub cookies: CookieConfig,
+    pub scans: ScanTracker,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,6 +50,12 @@ pub fn router(state: ApiState) -> Router {
             "/api/libraries/{id}",
             get(library::get_one).delete(library::delete),
         )
+        .route(
+            "/api/libraries/{id}/scan",
+            post(scan::start).get(scan::status),
+        )
+        .route("/api/libraries/{id}/movies", get(movie::list))
+        .route("/api/movies/{id}", get(movie::get_one))
         .with_state(state)
 }
 

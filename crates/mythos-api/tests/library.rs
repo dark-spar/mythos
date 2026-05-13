@@ -7,7 +7,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
-use mythos_api::{ApiState, CookieConfig};
+use mythos_api::{ApiState, CookieConfig, ScanTracker};
 use mythos_auth::{TokenConfig, token};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
@@ -26,6 +26,7 @@ async fn setup() -> (Router, SqlitePool) {
         db: pool.clone(),
         token,
         cookies,
+        scans: ScanTracker::new(),
     });
     (router, pool)
 }

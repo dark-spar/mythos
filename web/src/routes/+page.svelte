@@ -1,24 +1,21 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { resolve } from '$app/paths';
 	import { auth } from '$lib/auth.svelte';
+	import { listLibraries, type Library } from '$lib/libraries';
 
-	let health = $state<{ status: string; version: string } | null>(null);
+	let libraries = $state<Library[]>([]);
+	let loading = $state(true);
 	let error = $state<string | null>(null);
 
-	async function checkHealth() {
-		error = null;
+	onMount(async () => {
 		try {
-			const res = await fetch('/api/health');
-			if (!res.ok) throw new Error(`HTTP ${res.status}`);
-			health = await res.json();
+			libraries = await listLibraries();
 		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-			health = null;
+			error = e instanceof Error ? e.message : 'failed to load libraries';
+		} finally {
+			loading = false;
 		}
-	}
-
-	$effect(() => {
-		checkHealth();
 	});
 </script>
 
@@ -26,11 +23,11 @@
 	<title>Mythos</title>
 </svelte:head>
 
-<main class="mx-auto max-w-2xl px-6 py-16">
+<main class="mx-auto max-w-4xl px-6 py-12">
 	<header class="flex items-baseline justify-between">
 		<div>
 			<h1 class="text-4xl font-semibold tracking-tight">Mythos</h1>
-			<p class="mt-3 text-zinc-500">A self-hosted media server, written in Rust.</p>
+			<p class="mt-2 text-sm text-zinc-500">A self-hosted media server, written in Rust.</p>
 		</div>
 		{#if auth.user}
 			<div class="text-right text-sm">
@@ -55,24 +52,46 @@
 		{/if}
 	</header>
 
-	<section class="mt-10 rounded-lg border border-zinc-200 p-5 dark:border-zinc-800">
-		<h2 class="text-sm font-medium tracking-wide text-zinc-500 uppercase">Server</h2>
-		{#if health}
-			<p class="mt-2 text-zinc-900 dark:text-zinc-100">
-				<span class="inline-block size-2 rounded-full bg-emerald-500"></span>
-				<span class="ml-2 font-mono">{health.status}</span>
-				<span class="ml-2 text-zinc-400">v{health.version}</span>
-			</p>
+	<section class="mt-12">
+		<h2 class="text-sm font-medium tracking-wide text-zinc-500 uppercase">Your libraries</h2>
+		{#if loading}
+			<p class="mt-6 text-zinc-400">Loading…</p>
 		{:else if error}
-			<p class="mt-2 font-mono text-rose-500">offline — {error}</p>
+			<p class="mt-6 font-mono text-rose-500">offline — {error}</p>
+		{:else if libraries.length === 0}
+			<div
+				class="mt-6 rounded-lg border border-dashed border-zinc-300 p-8 text-center dark:border-zinc-700"
+			>
+				<p class="text-zinc-500">No libraries yet.</p>
+				{#if auth.user?.is_admin}
+					<a
+						href={resolve('/admin/libraries')}
+						class="mt-3 inline-block text-sm text-zinc-700 underline-offset-2 hover:underline dark:text-zinc-300"
+					>
+						Add one →
+					</a>
+				{:else}
+					<p class="mt-2 text-sm text-zinc-400">Ask an administrator to add one.</p>
+				{/if}
+			</div>
 		{:else}
-			<p class="mt-2 text-zinc-400">checking…</p>
+			<ul class="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
+				{#each libraries as library (library.id)}
+					<li>
+						<a
+							href={resolve(`/library/${library.id}`)}
+							class="block rounded-lg border border-zinc-200 p-5 transition hover:border-zinc-400 dark:border-zinc-800 dark:hover:border-zinc-600"
+						>
+							<p class="text-lg font-medium text-zinc-900 dark:text-zinc-100">
+								{library.name}
+							</p>
+							<p class="mt-1 text-xs tracking-wide text-zinc-500 uppercase">
+								{library.kind}
+							</p>
+						</a>
+					</li>
+				{/each}
+			</ul>
 		{/if}
-		<button
-			class="mt-4 rounded-md bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
-			onclick={checkHealth}
-		>
-			Refresh
-		</button>
 	</section>
 </main>

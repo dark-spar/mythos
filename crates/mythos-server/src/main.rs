@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use axum::Router;
-use mythos_api::CookieConfig;
+use mythos_api::{CookieConfig, ScanTracker};
 use mythos_auth::TokenConfig;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -67,7 +67,12 @@ async fn main() -> Result<()> {
 }
 
 fn build_app(db: mythos_db::SqlitePool, token: TokenConfig, cookies: CookieConfig) -> Router {
-    let api = mythos_api::router(mythos_api::ApiState { db, token, cookies });
+    let api = mythos_api::router(mythos_api::ApiState {
+        db,
+        token,
+        cookies,
+        scans: ScanTracker::new(),
+    });
     Router::new()
         .merge(api)
         .fallback(web::handler)

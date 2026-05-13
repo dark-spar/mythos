@@ -19,3 +19,9 @@ jwalk.workspace = true
 notify.workspace = true
 walkdir.workspace = true
 regex.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+sqlx.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

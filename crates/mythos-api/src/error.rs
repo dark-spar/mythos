@@ -45,6 +45,23 @@ impl IntoResponse for ApiError {
     }
 }
 
+impl From<mythos_db::DbError> for ApiError {
+    fn from(err: mythos_db::DbError) -> Self {
+        use mythos_db::DbError as E;
+        match err {
+            E::RootPathTaken => Self::new(StatusCode::CONFLICT, "root_path_taken"),
+            E::Decode(msg) => {
+                tracing::error!(error = msg, "db decode error");
+                Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal")
+            }
+            E::Sqlx(e) => Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal").with_source(e),
+            E::Migrate(e) => {
+                Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal").with_source(e)
+            }
+        }
+    }
+}
+
 impl From<mythos_auth::AuthError> for ApiError {
     fn from(err: mythos_auth::AuthError) -> Self {
         use mythos_auth::AuthError as E;

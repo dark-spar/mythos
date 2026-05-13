@@ -58,6 +58,32 @@ where
     }
 }
 
+/// Authenticated principal whose `is_admin` flag is `true`.
+///
+/// Built on top of [`AuthUser`]: a missing/invalid token rejects with 401
+/// (same as `AuthUser`); a valid token whose user is not an admin rejects
+/// with 403. Handlers can take `AdminUser` directly and not worry about
+/// the privilege check themselves.
+#[derive(Debug, Clone, Copy)]
+pub struct AdminUser(pub AuthUser);
+
+impl<S> FromRequestParts<S> for AdminUser
+where
+    S: Send + Sync,
+    TokenConfig: FromRef<S>,
+    SqlitePool: FromRef<S>,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let user = AuthUser::from_request_parts(parts, state).await?;
+        if !user.is_admin {
+            return Err(reject(AuthError::Forbidden));
+        }
+        Ok(AdminUser(user))
+    }
+}
+
 fn extract_token(headers: &HeaderMap) -> Option<String> {
     if let Some(value) = headers
         .get(header::AUTHORIZATION)
@@ -86,6 +112,10 @@ fn reject(err: AuthError) -> Response {
         AuthError::TokenExpired => json_response(
             StatusCode::UNAUTHORIZED,
             r#"{"error":"token_expired"}"#.to_string(),
+        ),
+        AuthError::Forbidden => json_response(
+            StatusCode::FORBIDDEN,
+            r#"{"error":"forbidden"}"#.to_string(),
         ),
         AuthError::Db(e) => {
             tracing::error!(error = ?e, "auth extractor db error");

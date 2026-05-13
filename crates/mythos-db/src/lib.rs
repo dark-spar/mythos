@@ -1,5 +1,8 @@
 //! Database access layer: connection pool, migrations, and query helpers.
 
+pub mod library;
+
+pub use library::LibraryRepo;
 pub use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use std::path::Path;
@@ -11,6 +14,14 @@ pub enum DbError {
     Sqlx(#[from] sqlx::Error),
     #[error("migration error: {0}")]
     Migrate(#[from] sqlx::migrate::MigrateError),
+    /// A row could not be turned into its domain type (corrupt id, bad
+    /// enum value, malformed timestamp, non-UTF-8 path). Means schema and
+    /// code have drifted — not a user error.
+    #[error("decode error: {0}")]
+    Decode(String),
+    /// Insert hit the `idx_libraries_root_path` unique index.
+    #[error("a library with that root path already exists")]
+    RootPathTaken,
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;

@@ -77,6 +77,8 @@ fast_image_resize = { version = "5", features = ["image"] }
 regex = "1"
 once_cell = "1"
 
+tempfile = "3"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

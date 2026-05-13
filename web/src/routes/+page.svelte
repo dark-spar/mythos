@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { resolve } from '$app/paths';
 	import { auth } from '$lib/auth.svelte';
 
 	let health = $state<{ status: string; version: string } | null>(null);
@@ -34,12 +35,22 @@
 		{#if auth.user}
 			<div class="text-right text-sm">
 				<p class="text-zinc-900 dark:text-zinc-100">{auth.user.username}</p>
-				<button
-					class="mt-1 text-zinc-500 underline-offset-2 hover:text-zinc-900 hover:underline dark:hover:text-zinc-100"
-					onclick={() => auth.logout()}
-				>
-					Sign out
-				</button>
+				<div class="mt-1 flex justify-end gap-3 text-zinc-500">
+					{#if auth.user.is_admin}
+						<a
+							href={resolve('/admin/libraries')}
+							class="underline-offset-2 hover:text-zinc-900 hover:underline dark:hover:text-zinc-100"
+						>
+							Libraries
+						</a>
+					{/if}
+					<button
+						class="underline-offset-2 hover:text-zinc-900 hover:underline dark:hover:text-zinc-100"
+						onclick={() => auth.logout()}
+					>
+						Sign out
+					</button>
+				</div>
 			</div>
 		{/if}
 	</header>

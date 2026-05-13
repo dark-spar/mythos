@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod error;
+pub mod library;
 
 use axum::extract::FromRef;
 use axum::{
@@ -40,6 +41,11 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/users/me", get(auth::me))
+        .route("/api/libraries", get(library::list).post(library::create))
+        .route(
+            "/api/libraries/{id}",
+            get(library::get_one).delete(library::delete),
+        )
         .with_state(state)
 }
 

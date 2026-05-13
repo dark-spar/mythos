@@ -25,7 +25,7 @@ pub mod token;
 pub mod user;
 
 pub use error::AuthError;
-pub use extractor::AuthUser;
+pub use extractor::{AdminUser, AuthUser};
 pub use token::{Claims, TokenConfig};
 pub use user::{NewUser, User, UserRepo};
 

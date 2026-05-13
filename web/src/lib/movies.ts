@@ -1,4 +1,4 @@
-import { apiGet } from './api';
+import { apiGet, apiPut } from './api';
 
 export interface Probe {
 	container: string | null;
@@ -45,9 +45,51 @@ export interface MoviesPage {
 	offset: number;
 }
 
+export interface WatchProgress {
+	position_seconds: number;
+	duration_seconds: number;
+	updated_at: string;
+}
+
 export interface MovieDetail {
 	movie: Movie;
 	file: MediaFile;
+	progress: WatchProgress | null;
+}
+
+export const putProgress = (
+	movieId: string,
+	positionSeconds: number,
+	durationSeconds: number
+): Promise<void> =>
+	apiPut(`/api/movies/${movieId}/progress`, {
+		position_seconds: positionSeconds,
+		duration_seconds: durationSeconds
+	});
+
+/// Fire-and-forget progress write that survives page unload by using
+/// `fetch` with `keepalive: true`. Returns no useful value — used in
+/// `beforeunload` / `visibilitychange` handlers where the browser won't
+/// wait for a full round-trip.
+export function sendProgressBeacon(
+	movieId: string,
+	positionSeconds: number,
+	durationSeconds: number
+): void {
+	try {
+		void fetch(`/api/movies/${movieId}/progress`, {
+			method: 'PUT',
+			credentials: 'same-origin',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({
+				position_seconds: positionSeconds,
+				duration_seconds: durationSeconds
+			}),
+			keepalive: true
+		});
+	} catch {
+		// nothing useful to do — page is going away
+	}
 }
 
 export const listMovies = (

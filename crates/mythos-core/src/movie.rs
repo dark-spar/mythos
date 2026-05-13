@@ -64,6 +64,14 @@ pub struct NewMovie {
     pub year: Option<i64>,
 }
 
+/// Per-user playback resume point.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchProgress {
+    pub position_seconds: f64,
+    pub duration_seconds: f64,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// Build a sort key that ignores leading articles ("The", "A", "An").
 ///
 /// "The Matrix" → "Matrix, The". This keeps browse grids alphabetically

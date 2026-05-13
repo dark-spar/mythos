@@ -3,10 +3,12 @@
 pub mod library;
 pub mod media_file;
 pub mod movie;
+pub mod progress;
 
 pub use library::LibraryRepo;
 pub use media_file::MediaFileRepo;
 pub use movie::{MovieRepo, UnenrichedMovie};
+pub use progress::ProgressRepo;
 pub use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use std::path::Path;

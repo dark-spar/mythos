@@ -6,4 +6,4 @@ pub mod movie;
 
 pub use library::{Library, LibraryKind, NewLibrary};
 pub use media::{MediaItem, MediaKind};
-pub use movie::{MediaFile, Movie, NewMediaFile, NewMovie, Probe, sort_title};
+pub use movie::{MediaFile, Movie, NewMediaFile, NewMovie, Probe, WatchProgress, sort_title};

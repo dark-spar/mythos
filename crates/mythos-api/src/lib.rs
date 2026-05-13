@@ -74,6 +74,11 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/libraries/{id}/movies", get(movie::list))
         .route("/api/movies/{id}", get(movie::get_one))
         .route("/api/movies/{id}/poster", get(movie::poster))
+        .route("/api/movies/{id}/stream", get(movie::stream))
+        .route(
+            "/api/movies/{id}/progress",
+            axum::routing::put(movie::put_progress),
+        )
         .with_state(state)
 }
 

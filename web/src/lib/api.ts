@@ -50,4 +50,5 @@ async function request<T>(method: string, url: string, body?: unknown): Promise<
 export const apiGet = <T>(url: string): Promise<T> => request<T>('GET', url);
 export const apiPost = <T>(url: string, body?: unknown): Promise<T> =>
 	request<T>('POST', url, body);
+export const apiPut = <T>(url: string, body?: unknown): Promise<T> => request<T>('PUT', url, body);
 export const apiDelete = <T>(url: string): Promise<T> => request<T>('DELETE', url);

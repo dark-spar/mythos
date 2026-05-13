@@ -1,18 +1,31 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import { ApiError } from '$lib/api';
 	import {
-		getMovie,
 		formatBytes,
 		formatDuration,
 		formatResolution,
+		getMovie,
+		putProgress,
+		sendProgressBeacon,
 		type MovieDetail
 	} from '$lib/movies';
 
 	let detail = $state<MovieDetail | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+
+	let videoEl: HTMLVideoElement | undefined = $state();
+	let initialPosition = $state<number | null>(null);
+	let lastSavedAt = 0;
+	let saveError = $state<string | null>(null);
+
+	/// How often during normal playback to write progress to the server.
+	/// Pause / visibility-hidden / unload force an immediate write
+	/// regardless of this interval.
+	const SAVE_INTERVAL_MS = 10_000;
 
 	const id = $derived(page.params.id as string);
 
@@ -21,8 +34,14 @@
 		(async () => {
 			loading = true;
 			error = null;
+			detail = null;
+			initialPosition = null;
+			lastSavedAt = 0;
 			try {
 				detail = await getMovie(currentId);
+				if (detail.progress && detail.progress.position_seconds > 1) {
+					initialPosition = detail.progress.position_seconds;
+				}
 			} catch (e) {
 				error =
 					e instanceof ApiError
@@ -37,13 +56,82 @@
 			}
 		})();
 	});
+
+	function handleLoadedMetadata() {
+		if (videoEl && initialPosition != null && !Number.isNaN(videoEl.duration)) {
+			// Don't auto-resume past the end. 5s margin so refreshes near
+			// the credits don't reset to the start.
+			const target = Math.min(initialPosition, Math.max(0, videoEl.duration - 5));
+			if (target > 0) {
+				videoEl.currentTime = target;
+			}
+		}
+	}
+
+	async function saveNow(reason: string) {
+		if (!detail || !videoEl) return;
+		const pos = videoEl.currentTime;
+		const dur = videoEl.duration;
+		if (!Number.isFinite(pos) || !Number.isFinite(dur) || dur <= 0) return;
+		lastSavedAt = Date.now();
+		try {
+			await putProgress(detail.movie.id, pos, dur);
+			saveError = null;
+		} catch (e) {
+			saveError =
+				e instanceof Error ? `Couldn't save progress (${reason}): ${e.message}` : 'save failed';
+		}
+	}
+
+	function handleTimeUpdate() {
+		if (Date.now() - lastSavedAt >= SAVE_INTERVAL_MS) {
+			void saveNow('tick');
+		}
+	}
+
+	function handlePause() {
+		void saveNow('pause');
+	}
+
+	function handleVisibilityChange() {
+		if (!detail || !videoEl) return;
+		if (document.hidden && !videoEl.paused) {
+			// Tab/window hidden during playback: write via keepalive
+			// because the page may be backgrounded or terminated before a
+			// regular fetch would complete.
+			const pos = videoEl.currentTime;
+			const dur = videoEl.duration;
+			if (Number.isFinite(pos) && Number.isFinite(dur) && dur > 0) {
+				sendProgressBeacon(detail.movie.id, pos, dur);
+				lastSavedAt = Date.now();
+			}
+		}
+	}
+
+	function handleBeforeUnload() {
+		if (!detail || !videoEl) return;
+		const pos = videoEl.currentTime;
+		const dur = videoEl.duration;
+		if (Number.isFinite(pos) && Number.isFinite(dur) && dur > 0) {
+			sendProgressBeacon(detail.movie.id, pos, dur);
+		}
+	}
+
+	onMount(() => {
+		document.addEventListener('visibilitychange', handleVisibilityChange);
+		window.addEventListener('beforeunload', handleBeforeUnload);
+		return () => {
+			document.removeEventListener('visibilitychange', handleVisibilityChange);
+			window.removeEventListener('beforeunload', handleBeforeUnload);
+		};
+	});
 </script>
 
 <svelte:head>
 	<title>{detail?.movie.title ?? 'Movie'} — Mythos</title>
 </svelte:head>
 
-<main class="mx-auto max-w-3xl px-6 py-12">
+<main class="mx-auto max-w-5xl px-6 py-12">
 	{#if detail}
 		<a
 			href={resolve(`/library/${detail.movie.library_id}`)}
@@ -65,12 +153,37 @@
 	{:else if error}
 		<p class="mt-8 font-mono text-rose-500">{error}</p>
 	{:else if detail}
-		<div class="mt-4 flex flex-col gap-6 sm:flex-row sm:items-start">
+		<section class="mt-4 overflow-hidden rounded-lg bg-black">
+			<!-- svelte-ignore a11y_media_has_caption -->
+			<!-- Subtitle / caption tracks are a Phase 3+ feature; user-supplied
+			     media has no guaranteed caption source. -->
+			<video
+				bind:this={videoEl}
+				controls
+				preload="metadata"
+				src={`/api/movies/${detail.movie.id}/stream`}
+				class="aspect-video w-full"
+				onloadedmetadata={handleLoadedMetadata}
+				ontimeupdate={handleTimeUpdate}
+				onpause={handlePause}
+			>
+				Your browser can't play this file directly. HLS transcoding lands in Phase 4.
+			</video>
+		</section>
+		{#if saveError}
+			<p class="mt-2 text-xs text-rose-500">{saveError}</p>
+		{:else if initialPosition != null}
+			<p class="mt-2 text-xs text-zinc-500">
+				Resuming from {formatDuration(initialPosition)}.
+			</p>
+		{/if}
+
+		<div class="mt-8 flex flex-col gap-6 sm:flex-row sm:items-start">
 			{#if detail.movie.poster_url}
 				<img
 					src={detail.movie.poster_url}
 					alt="{detail.movie.title} poster"
-					class="w-40 shrink-0 rounded shadow-sm sm:w-48"
+					class="w-32 shrink-0 rounded shadow-sm sm:w-40"
 				/>
 			{/if}
 			<div class="min-w-0">

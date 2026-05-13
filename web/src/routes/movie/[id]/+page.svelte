@@ -4,12 +4,14 @@
 	import { resolve } from '$app/paths';
 	import { ApiError } from '$lib/api';
 	import {
+		browserCompatIssues,
 		formatBytes,
 		formatDuration,
 		formatResolution,
 		getMovie,
 		putProgress,
 		sendProgressBeacon,
+		type CompatIssue,
 		type MovieDetail
 	} from '$lib/movies';
 
@@ -117,12 +119,74 @@
 		}
 	}
 
+	function toggleFullscreen() {
+		if (!videoEl) return;
+		if (document.fullscreenElement) {
+			void document.exitFullscreen();
+		} else {
+			void videoEl.requestFullscreen();
+		}
+	}
+
+	function handleKeydown(event: KeyboardEvent) {
+		if (!videoEl) return;
+		// Don't steal keys from form inputs.
+		const target = event.target as HTMLElement | null;
+		if (
+			target &&
+			(target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+		) {
+			return;
+		}
+		if (event.metaKey || event.ctrlKey || event.altKey) return;
+
+		switch (event.key.toLowerCase()) {
+			case 'f':
+				event.preventDefault();
+				toggleFullscreen();
+				break;
+			case ' ':
+			case 'k':
+				event.preventDefault();
+				if (videoEl.paused) void videoEl.play();
+				else videoEl.pause();
+				break;
+			case 'm':
+				event.preventDefault();
+				videoEl.muted = !videoEl.muted;
+				break;
+			case 'arrowright':
+				event.preventDefault();
+				videoEl.currentTime = Math.min(videoEl.duration || Infinity, videoEl.currentTime + 10);
+				break;
+			case 'arrowleft':
+				event.preventDefault();
+				videoEl.currentTime = Math.max(0, videoEl.currentTime - 10);
+				break;
+		}
+	}
+
+	function issueLabel(issue: CompatIssue): string {
+		switch (issue.kind) {
+			case 'container':
+				return `Container .${issue.value}`;
+			case 'video_codec':
+				return `Video codec ${issue.value}`;
+			case 'audio_codec':
+				return `Audio codec ${issue.value}`;
+		}
+	}
+
+	const compatIssues = $derived(detail ? browserCompatIssues(detail.file) : []);
+
 	onMount(() => {
 		document.addEventListener('visibilitychange', handleVisibilityChange);
 		window.addEventListener('beforeunload', handleBeforeUnload);
+		window.addEventListener('keydown', handleKeydown);
 		return () => {
 			document.removeEventListener('visibilitychange', handleVisibilityChange);
 			window.removeEventListener('beforeunload', handleBeforeUnload);
+			window.removeEventListener('keydown', handleKeydown);
 		};
 	});
 </script>
@@ -170,11 +234,39 @@
 				Your browser can't play this file directly. HLS transcoding lands in Phase 4.
 			</video>
 		</section>
+		{#if compatIssues.length > 0}
+			<div
+				class="mt-2 rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200"
+				role="status"
+			>
+				<p>
+					Your browser may not be able to play this file natively. Video plays but audio is silent?
+					Most likely:
+				</p>
+				<ul class="mt-1 ml-4 list-disc">
+					{#each compatIssues as issue (issue.kind)}
+						<li><span class="font-mono">{issueLabel(issue)}</span></li>
+					{/each}
+				</ul>
+				<p class="mt-2">HLS transcoding (Phase 4) will fix this.</p>
+			</div>
+		{/if}
 		{#if saveError}
 			<p class="mt-2 text-xs text-rose-500">{saveError}</p>
 		{:else if initialPosition != null}
 			<p class="mt-2 text-xs text-zinc-500">
-				Resuming from {formatDuration(initialPosition)}.
+				Resuming from {formatDuration(initialPosition)}. Press
+				<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">f</kbd> for
+				fullscreen,
+				<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">space</kbd> to play/pause.
+			</p>
+		{:else}
+			<p class="mt-2 text-xs text-zinc-500">
+				<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">f</kbd> fullscreen ·
+				<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">space</kbd> play/pause
+				·
+				<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">m</kbd> mute ·
+				<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">←/→</kbd> seek 10s
 			</p>
 		{/if}
 

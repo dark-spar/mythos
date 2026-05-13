@@ -134,3 +134,31 @@ export function formatBytes(bytes: number): string {
 	}
 	return `${n.toFixed(1)} ${unit}`;
 }
+
+/// Browser-friendly codec/container allowlists. Best effort — actual
+/// support varies by browser and codec build flags. We surface a warning
+/// when something falls outside these lists so users aren't left guessing
+/// why a track is silent.
+const BROWSER_SAFE_VIDEO = ['h264', 'avc1', 'vp9', 'vp09', 'av1', 'av01'];
+const BROWSER_SAFE_AUDIO = ['aac', 'mp4a', 'mp3', 'opus', 'vorbis'];
+const BROWSER_UNSAFE_EXT = ['mkv', 'avi', 'wmv', 'ts', 'm2ts', 'mov'];
+
+export interface CompatIssue {
+	kind: 'container' | 'video_codec' | 'audio_codec';
+	value: string;
+}
+
+export function browserCompatIssues(file: MediaFile): CompatIssue[] {
+	const issues: CompatIssue[] = [];
+	const ext = file.path.split('.').pop()?.toLowerCase();
+	if (ext && BROWSER_UNSAFE_EXT.includes(ext)) {
+		issues.push({ kind: 'container', value: ext });
+	}
+	if (file.video_codec && !BROWSER_SAFE_VIDEO.includes(file.video_codec.toLowerCase())) {
+		issues.push({ kind: 'video_codec', value: file.video_codec });
+	}
+	if (file.audio_codec && !BROWSER_SAFE_AUDIO.includes(file.audio_codec.toLowerCase())) {
+		issues.push({ kind: 'audio_codec', value: file.audio_codec });
+	}
+	return issues;
+}

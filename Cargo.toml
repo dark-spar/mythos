@@ -8,6 +8,7 @@ members = [
     "crates/mythos-meta",
     "crates/mythos-stream",
     "crates/mythos-api",
+    "crates/mythos-auth",
 ]
 
 [workspace.package]
@@ -24,6 +25,7 @@ mythos-scan = { path = "crates/mythos-scan" }
 mythos-meta = { path = "crates/mythos-meta" }
 mythos-stream = { path = "crates/mythos-stream" }
 mythos-api = { path = "crates/mythos-api" }
+mythos-auth = { path = "crates/mythos-auth" }
 
 axum = { version = "0.8", features = ["macros", "http2"] }
 tower = "0.5"
@@ -53,8 +55,11 @@ url = "2"
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
-argon2 = "0.5"
+argon2 = { version = "0.5", features = ["std"] }
 jsonwebtoken = "9"
+cookie = "0.18"
+base64 = "0.22"
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 rust-embed = { version = "8", features = ["mime-guess"] }
 mime_guess = "2"

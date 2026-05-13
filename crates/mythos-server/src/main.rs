@@ -1,6 +1,10 @@
 use anyhow::{Context, Result};
 use axum::Router;
+use mythos_api::CookieConfig;
+use mythos_auth::TokenConfig;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tower_http::compression::CompressionLayer;
@@ -9,6 +13,7 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 mod config;
+mod secret;
 mod web;
 
 use config::Config;
@@ -32,7 +37,16 @@ async fn main() -> Result<()> {
         .await
         .context("running database migrations")?;
 
-    let app = build_app(pool);
+    let secret = secret::resolve(&cfg.data_dir).context("resolving JWT secret")?;
+    let token = TokenConfig::new(
+        Arc::<[u8]>::from(secret.as_slice()),
+        Duration::from_secs(cfg.token_ttl_days * 24 * 60 * 60),
+    );
+    let cookies = CookieConfig {
+        secure: cfg.cookie_secure,
+    };
+
+    let app = build_app(pool, token, cookies);
 
     let listener = TcpListener::bind(cfg.listen)
         .await
@@ -52,8 +66,8 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn build_app(db: mythos_db::SqlitePool) -> Router {
-    let api = mythos_api::router(mythos_api::ApiState { db });
+fn build_app(db: mythos_db::SqlitePool, token: TokenConfig, cookies: CookieConfig) -> Router {
+    let api = mythos_api::router(mythos_api::ApiState { db, token, cookies });
     Router::new()
         .merge(api)
         .fallback(web::handler)

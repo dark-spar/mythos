@@ -1,13 +1,29 @@
-//! HTTP API surface. Phase 0 ships only the health endpoint; resource routers
-//! land in subsequent phases.
+//! HTTP API surface.
 
-use axum::{Json, Router, routing::get};
+pub mod auth;
+pub mod error;
+
+use axum::extract::FromRef;
+use axum::{
+    Json, Router,
+    routing::{get, post},
+};
+use mythos_auth::TokenConfig;
 use serde::Serialize;
 use sqlx::SqlitePool;
 
-#[derive(Debug, Clone)]
+pub use error::{ApiError, ApiResult};
+
+#[derive(Clone, Debug)]
+pub struct CookieConfig {
+    pub secure: bool,
+}
+
+#[derive(Clone, FromRef)]
 pub struct ApiState {
     pub db: SqlitePool,
+    pub token: TokenConfig,
+    pub cookies: CookieConfig,
 }
 
 #[derive(Debug, Serialize)]
@@ -19,6 +35,11 @@ struct Health {
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/api/health", get(health))
+        .route("/api/auth/status", get(auth::status))
+        .route("/api/auth/register", post(auth::register))
+        .route("/api/auth/login", post(auth::login))
+        .route("/api/auth/logout", post(auth::logout))
+        .route("/api/users/me", get(auth::me))
         .with_state(state)
 }
 

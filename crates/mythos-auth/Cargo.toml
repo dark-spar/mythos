@@ -1,0 +1,28 @@
+[package]
+name = "mythos-auth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Authentication primitives for Mythos: argon2 password hashing, JWT issuance/verification, and an axum extractor."
+
+[dependencies]
+mythos-core.workspace = true
+
+axum.workspace = true
+sqlx.workspace = true
+serde.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+argon2.workspace = true
+jsonwebtoken.workspace = true
+cookie.workspace = true
+rand_core.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+serde_json.workspace = true

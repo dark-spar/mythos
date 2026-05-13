@@ -9,6 +9,23 @@ pub struct Config {
     pub listen: SocketAddr,
     pub data_dir: PathBuf,
     pub log_filter: String,
+    /// Set the `Secure` flag on auth cookies. Defaults to `false` in debug
+    /// builds (so plaintext localhost works) and `true` in release builds.
+    /// Override in mythos.toml or via `MYTHOS_COOKIE_SECURE` for reverse
+    /// proxy setups where TLS terminates upstream.
+    #[serde(default = "default_cookie_secure")]
+    pub cookie_secure: bool,
+    /// Lifetime of issued JWTs, in days.
+    #[serde(default = "default_token_ttl_days")]
+    pub token_ttl_days: u64,
+}
+
+fn default_cookie_secure() -> bool {
+    !cfg!(debug_assertions)
+}
+
+fn default_token_ttl_days() -> u64 {
+    30
 }
 
 impl Default for Config {
@@ -17,6 +34,8 @@ impl Default for Config {
             listen: "127.0.0.1:8080".parse().unwrap(),
             data_dir: PathBuf::from("./data"),
             log_filter: "info,mythos=debug,sqlx=warn".to_string(),
+            cookie_secure: default_cookie_secure(),
+            token_ttl_days: default_token_ttl_days(),
         }
     }
 }

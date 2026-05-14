@@ -266,6 +266,7 @@ impl TranscodeManager {
             movie = %key.movie_id,
             seg_idx,
             offset_seconds,
+            encoder = self.inner.accel.h264_encoder(),
             "starting ffmpeg transcode session"
         );
 

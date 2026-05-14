@@ -61,22 +61,27 @@ impl HwAccel {
         }
     }
 
-    /// Flags that go BEFORE `-i`. Currently used only for device
-    /// binding — full HW decode pipelines (`-hwaccel X
-    /// -hwaccel_output_format X`) are intentionally not enabled by
-    /// default because they're fragile across input codecs: a 10-bit
-    /// HEVC source decoded to P010 surfaces breaks h264_vaapi /
-    /// h264_qsv encoding ("No usable encoding profile found"), and a
-    /// codec the GPU can't decode at all (less common) hangs the
-    /// pipeline. We use SW decode + HW encode for now — the encode
-    /// side is the bigger cost for any transcode-to-H.264, so we keep
-    /// most of the win without the fragility.
+    /// Flags that go BEFORE `-i`. For VAAPI we enable the full HW
+    /// pipeline (decode on GPU, surfaces stay on GPU, encode on GPU)
+    /// because SW decode of 1080p+ HEVC pins a CPU core, undoing most
+    /// of the win from HW encode. The 10-bit P010 problem that
+    /// previously blocked this is handled in `encode_args` by
+    /// inserting `scale_vaapi=format=nv12` to convert on-GPU before
+    /// the encoder.
     ///
-    /// VAAPI still needs `-vaapi_device` here because the encoder
-    /// itself binds to a device handle, not because decode runs on it.
+    /// If your library has a codec the iGPU can't HW-decode, ffmpeg
+    /// will error on the input; falling back to `MYTHOS_HW_ENCODER=cpu`
+    /// recovers cleanly.
     pub fn decode_args(self) -> &'static [&'static str] {
         match self {
-            HwAccel::Vaapi => &["-vaapi_device", "/dev/dri/renderD128"],
+            HwAccel::Vaapi => &[
+                "-hwaccel",
+                "vaapi",
+                "-vaapi_device",
+                "/dev/dri/renderD128",
+                "-hwaccel_output_format",
+                "vaapi",
+            ],
             HwAccel::Qsv | HwAccel::Nvenc | HwAccel::VideoToolbox | HwAccel::Cpu => &[],
         }
     }
@@ -108,14 +113,15 @@ impl HwAccel {
                 "23".into(),
             ],
             HwAccel::Vaapi => vec![
-                // Force NV12 in CPU memory (so 10-bit HEVC sources get
-                // tonemapped to 8-bit before reaching the encoder),
-                // then upload the surface to the GPU for h264_vaapi.
-                // Without this, sources in P010 / yuv420p10le hit
-                // "No usable encoding profile found" because mainline
-                // VAAPI doesn't support High10 AVC encoding.
+                // Decode runs on the GPU (see decode_args) so frames
+                // arrive as VAAPI surfaces, possibly in P010 (10-bit
+                // HEVC source). `scale_vaapi=format=nv12` does the
+                // 10→8-bit conversion on the GPU before handing
+                // frames to h264_vaapi, which only encodes 8-bit AVC.
+                // Without this filter, mainline VAAPI rejects with
+                // "No usable encoding profile found".
                 "-vf".into(),
-                "format=nv12,hwupload".into(),
+                "scale_vaapi=format=nv12".into(),
                 "-c:v".into(),
                 "h264_vaapi".into(),
                 "-qp".into(),
@@ -278,7 +284,16 @@ async fn smoke_test(accel: HwAccel) -> bool {
         .arg("lavfi")
         .arg("-i")
         .arg("color=red:size=160x90:duration=0.3:rate=10");
-    cmd.args(accel.encode_args());
+    // Production VAAPI uses scale_vaapi on GPU-resident surfaces, but
+    // the smoke test feeds CPU frames from lavfi. Substitute the
+    // upload-then-encode filter chain here; both still exercise the
+    // h264_vaapi encoder + driver chain, which is what we're verifying.
+    if accel == HwAccel::Vaapi {
+        cmd.arg("-vf").arg("format=nv12,hwupload");
+        cmd.arg("-c:v").arg("h264_vaapi").arg("-qp").arg("23");
+    } else {
+        cmd.args(accel.encode_args());
+    }
     cmd.arg("-frames:v").arg("3").arg("-f").arg("null").arg("-");
 
     cmd.stdout(Stdio::null()).stderr(Stdio::null());

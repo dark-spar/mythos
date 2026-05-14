@@ -548,19 +548,19 @@
 	<title>{detail?.movie.title ?? 'Movie'} — Mythos</title>
 </svelte:head>
 
-<main class="pb-12">
+<main class="min-h-screen bg-black pb-12 text-zinc-100">
 	<div class="mx-auto max-w-5xl px-6 pt-12">
 		{#if detail}
 			<a
 				href={resolve(`/library/${detail.movie.library_id}`)}
-				class="text-sm text-zinc-500 underline-offset-2 hover:text-zinc-900 hover:underline dark:hover:text-zinc-100"
+				class="text-sm text-zinc-400 underline-offset-2 hover:text-zinc-100 hover:underline"
 			>
 				← Back to library
 			</a>
 		{:else}
 			<a
 				href={resolve('/')}
-				class="text-sm text-zinc-500 underline-offset-2 hover:text-zinc-900 hover:underline dark:hover:text-zinc-100"
+				class="text-sm text-zinc-400 underline-offset-2 hover:text-zinc-100 hover:underline"
 			>
 				← Home
 			</a>
@@ -570,7 +570,7 @@
 	{#if loading}
 		<p class="mx-auto mt-8 max-w-5xl px-6 text-zinc-400">Loading…</p>
 	{:else if error}
-		<p class="mx-auto mt-8 max-w-5xl px-6 font-mono text-rose-500">{error}</p>
+		<p class="mx-auto mt-8 max-w-5xl px-6 font-mono text-rose-400">{error}</p>
 	{:else if detail}
 		<!--
 			The player breaks out of the narrow content column. `w-full`
@@ -612,11 +612,11 @@
 		<div class="mx-auto max-w-5xl px-6">
 			{#if detail.subtitles.length > 0}
 				<div class="mt-3 flex items-center gap-2 text-sm">
-					<label for="subtitle-select" class="text-zinc-500">Subtitles</label>
+					<label for="subtitle-select" class="text-zinc-400">Subtitles</label>
 					<select
 						id="subtitle-select"
 						bind:value={selectedSubId}
-						class="rounded border border-zinc-300 bg-white px-2 py-1 text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+						class="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-zinc-100"
 					>
 						<option value={null}>Off</option>
 						{#each detail.subtitles as sub (sub.id)}
@@ -624,13 +624,13 @@
 						{/each}
 					</select>
 					{#if selectedSub?.is_image}
-						<span class="text-xs text-zinc-500">— burning into stream</span>
+						<span class="text-xs text-zinc-400">— burning into stream</span>
 					{/if}
 				</div>
 			{/if}
 			{#if playPlan && playPlan.mode !== 'direct_play'}
 				<div
-					class="mt-2 rounded border border-sky-300 bg-sky-50 p-3 text-xs text-sky-900 dark:border-sky-700 dark:bg-sky-950 dark:text-sky-200"
+					class="mt-2 rounded border border-sky-700 bg-sky-950 p-3 text-xs text-sky-200"
 					role="status"
 				>
 					<p>
@@ -649,21 +649,19 @@
 				</div>
 			{/if}
 			{#if saveError}
-				<p class="mt-2 text-xs text-rose-500">{saveError}</p>
+				<p class="mt-2 text-xs text-rose-400">{saveError}</p>
 			{:else if initialPosition != null}
-				<p class="mt-2 text-xs text-zinc-500">
+				<p class="mt-2 text-xs text-zinc-400">
 					Resuming from {formatDuration(initialPosition)}. Press
-					<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">f</kbd> for
-					fullscreen,
-					<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">space</kbd> to play/pause.
+					<kbd class="rounded border border-zinc-700 px-1">f</kbd> for fullscreen,
+					<kbd class="rounded border border-zinc-700 px-1">space</kbd> to play/pause.
 				</p>
 			{:else}
-				<p class="mt-2 text-xs text-zinc-500">
-					<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">f</kbd> fullscreen ·
-					<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">space</kbd>
-					play/pause ·
-					<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">m</kbd> mute ·
-					<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">←/→</kbd> seek 10s
+				<p class="mt-2 text-xs text-zinc-400">
+					<kbd class="rounded border border-zinc-700 px-1">f</kbd> fullscreen ·
+					<kbd class="rounded border border-zinc-700 px-1">space</kbd> play/pause ·
+					<kbd class="rounded border border-zinc-700 px-1">m</kbd> mute ·
+					<kbd class="rounded border border-zinc-700 px-1">←/→</kbd> seek 10s
 				</p>
 			{/if}
 
@@ -678,46 +676,46 @@
 				<div class="min-w-0">
 					<h1 class="text-3xl font-semibold tracking-tight">{detail.movie.title}</h1>
 					{#if detail.movie.year != null}
-						<p class="mt-1 text-zinc-500">{detail.movie.year}</p>
+						<p class="mt-1 text-zinc-400">{detail.movie.year}</p>
 					{/if}
 
 					{#if detail.movie.overview}
-						<p class="mt-4 leading-relaxed text-zinc-700 dark:text-zinc-300">
+						<p class="mt-4 leading-relaxed text-zinc-300">
 							{detail.movie.overview}
 						</p>
 					{:else}
-						<p class="mt-4 text-sm text-zinc-400 italic">
+						<p class="mt-4 text-sm text-zinc-500 italic">
 							No description on file. Configure a TMDb API key and rescan to enrich.
 						</p>
 					{/if}
 				</div>
 			</div>
 
-			<section class="mt-10 rounded-lg border border-zinc-200 p-5 dark:border-zinc-800">
-				<h2 class="text-sm font-medium tracking-wide text-zinc-500 uppercase">File</h2>
+			<section class="mt-10 rounded-lg border border-zinc-800 p-5">
+				<h2 class="text-sm font-medium tracking-wide text-zinc-400 uppercase">File</h2>
 				<dl class="mt-4 grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 text-sm">
-					<dt class="text-zinc-500">Path</dt>
-					<dd class="font-mono break-all text-zinc-900 dark:text-zinc-100">{detail.file.path}</dd>
+					<dt class="text-zinc-400">Path</dt>
+					<dd class="font-mono break-all text-zinc-100">{detail.file.path}</dd>
 
-					<dt class="text-zinc-500">Container</dt>
-					<dd class="text-zinc-900 dark:text-zinc-100">{detail.file.container ?? '—'}</dd>
+					<dt class="text-zinc-400">Container</dt>
+					<dd class="text-zinc-100">{detail.file.container ?? '—'}</dd>
 
-					<dt class="text-zinc-500">Video</dt>
-					<dd class="text-zinc-900 dark:text-zinc-100">{detail.file.video_codec ?? '—'}</dd>
+					<dt class="text-zinc-400">Video</dt>
+					<dd class="text-zinc-100">{detail.file.video_codec ?? '—'}</dd>
 
-					<dt class="text-zinc-500">Audio</dt>
-					<dd class="text-zinc-900 dark:text-zinc-100">{detail.file.audio_codec ?? '—'}</dd>
+					<dt class="text-zinc-400">Audio</dt>
+					<dd class="text-zinc-100">{detail.file.audio_codec ?? '—'}</dd>
 
-					<dt class="text-zinc-500">Resolution</dt>
-					<dd class="text-zinc-900 dark:text-zinc-100">{formatResolution(detail.file) ?? '—'}</dd>
+					<dt class="text-zinc-400">Resolution</dt>
+					<dd class="text-zinc-100">{formatResolution(detail.file) ?? '—'}</dd>
 
-					<dt class="text-zinc-500">Duration</dt>
-					<dd class="text-zinc-900 dark:text-zinc-100">
+					<dt class="text-zinc-400">Duration</dt>
+					<dd class="text-zinc-100">
 						{formatDuration(detail.file.duration_seconds)}
 					</dd>
 
-					<dt class="text-zinc-500">Size</dt>
-					<dd class="text-zinc-900 dark:text-zinc-100">{formatBytes(detail.file.size_bytes)}</dd>
+					<dt class="text-zinc-400">Size</dt>
+					<dd class="text-zinc-100">{formatBytes(detail.file.size_bytes)}</dd>
 				</dl>
 			</section>
 		</div>

@@ -63,15 +63,16 @@ impl HwAccel {
         }
     }
 
-    /// Flags that go BEFORE `-i`. For VAAPI we enable the full HW
-    /// pipeline (decode on GPU, surfaces stay on GPU, encode on GPU)
-    /// because SW decode of 1080p+ HEVC pins a CPU core, undoing most
-    /// of the win from HW encode. The 10-bit P010 problem that
-    /// previously blocked this is handled in `encode_args` by
-    /// inserting `scale_vaapi=format=nv12` to convert on-GPU before
-    /// the encoder.
+    /// Flags that go BEFORE `-i`. For VAAPI and NVENC we enable the
+    /// full HW pipeline (decode on GPU, surfaces stay on GPU, encode
+    /// on GPU) because SW decode of 1080p+ HEVC pins a CPU core,
+    /// undoing most of the win from HW encode. The 10-bit format
+    /// conversion happens on-GPU in `scale_filter`
+    /// (`scale_vaapi=format=nv12` / `scale_cuda=format=yuv420p`)
+    /// before the encoder, which is required because h264_nvenc /
+    /// h264_vaapi only emit 8-bit.
     ///
-    /// If your library has a codec the iGPU can't HW-decode, ffmpeg
+    /// If your library has a codec the GPU can't HW-decode, ffmpeg
     /// will error on the input; falling back to `MYTHOS_HW_ENCODER=cpu`
     /// recovers cleanly.
     pub fn decode_args(self) -> &'static [&'static str] {
@@ -84,7 +85,8 @@ impl HwAccel {
                 "-hwaccel_output_format",
                 "vaapi",
             ],
-            HwAccel::Qsv | HwAccel::Nvenc | HwAccel::VideoToolbox | HwAccel::Cpu => &[],
+            HwAccel::Nvenc => &["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"],
+            HwAccel::Qsv | HwAccel::VideoToolbox | HwAccel::Cpu => &[],
         }
     }
 
@@ -141,15 +143,16 @@ impl HwAccel {
 
     /// Per-rendition scale filter, applied inside the
     /// `-filter_complex` graph after a `split` fan-out. CPU uses
-    /// `scale`; VAAPI uses `scale_vaapi` so the resize happens on the
-    /// GPU. The output of this filter must accept the encoder's input
-    /// format (NV12 for VAAPI; yuv420p for libx264).
+    /// `scale`; VAAPI uses `scale_vaapi` and NVENC uses `scale_cuda`
+    /// so the resize happens on the GPU and frames never round-trip
+    /// to system memory. The output of this filter must accept the
+    /// encoder's input format (NV12 for VAAPI; yuv420p elsewhere).
     ///
-    /// The 8-bit `yuv420p` tail on the CPU/QSV/NVENC/VideoToolbox path
-    /// forces a 10→8 downconvert when the source is 10-bit (HEVC
-    /// Main10 etc). H.264 hardware encoders don't accept
-    /// `yuv420p10le`; without this `h264_nvenc` errors with
-    /// "10 bit encode not supported / No capable devices found".
+    /// The 8-bit format tail on every path forces a 10→8 downconvert
+    /// when the source is 10-bit (HEVC Main10 etc). H.264 hardware
+    /// encoders don't accept 10-bit pixel formats; without this
+    /// `h264_nvenc` errors with "10 bit encode not supported / No
+    /// capable devices found".
     ///
     /// Width is `-2` (auto from source aspect, snapped to an even
     /// number) so non-16:9 prints (Cinerama 2.20:1, IMAX 1.43:1,
@@ -161,7 +164,8 @@ impl HwAccel {
     pub fn scale_filter(self, rendition: &Rendition) -> String {
         match self {
             HwAccel::Vaapi => format!("scale_vaapi=w=-2:h={}:format=nv12", rendition.height),
-            HwAccel::Cpu | HwAccel::Qsv | HwAccel::Nvenc | HwAccel::VideoToolbox => {
+            HwAccel::Nvenc => format!("scale_cuda=w=-2:h={}:format=yuv420p", rendition.height),
+            HwAccel::Cpu | HwAccel::Qsv | HwAccel::VideoToolbox => {
                 format!("scale=w=-2:h={},format=yuv420p", rendition.height)
             }
         }

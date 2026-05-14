@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use mythos_core::Probe;
+use mythos_core::{NewSubtitle, Probe, is_image_subtitle_codec};
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::process::Command;
@@ -62,10 +62,29 @@ struct Format {
 
 #[derive(Debug, Deserialize)]
 struct Stream {
+    index: Option<i64>,
     codec_type: Option<String>,
     codec_name: Option<String>,
     width: Option<i64>,
     height: Option<i64>,
+    #[serde(default)]
+    tags: StreamTags,
+    #[serde(default)]
+    disposition: StreamDisposition,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct StreamTags {
+    language: Option<String>,
+    title: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct StreamDisposition {
+    #[serde(default)]
+    default: i64,
+    #[serde(default)]
+    forced: i64,
 }
 
 impl FfProbeOutput {
@@ -93,6 +112,25 @@ impl FfProbeOutput {
             .iter()
             .find(|s| s.codec_type.as_deref() == Some("audio"));
 
+        let subtitles = self
+            .streams
+            .iter()
+            .filter(|s| s.codec_type.as_deref() == Some("subtitle"))
+            .filter_map(|s| {
+                let stream_index = s.index?;
+                let codec = s.codec_name.clone()?;
+                Some(NewSubtitle {
+                    stream_index,
+                    is_image: is_image_subtitle_codec(&codec),
+                    codec,
+                    language: s.tags.language.clone(),
+                    title: s.tags.title.clone(),
+                    is_default: s.disposition.default != 0,
+                    is_forced: s.disposition.forced != 0,
+                })
+            })
+            .collect();
+
         Probe {
             container,
             video_codec: video.and_then(|s| s.codec_name.clone()),
@@ -100,6 +138,7 @@ impl FfProbeOutput {
             duration_seconds,
             width: video.and_then(|s| s.width),
             height: video.and_then(|s| s.height),
+            subtitles,
         }
     }
 }

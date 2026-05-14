@@ -4,6 +4,7 @@ pub mod library;
 pub mod media_file;
 pub mod movie;
 pub mod progress;
+pub mod subtitle;
 
 pub use library::LibraryRepo;
 pub use media_file::MediaFileRepo;
@@ -13,6 +14,7 @@ pub use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use std::path::Path;
 use std::str::FromStr;
+pub use subtitle::SubtitleRepo;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {

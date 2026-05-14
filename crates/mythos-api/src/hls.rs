@@ -22,15 +22,17 @@
 
 use std::path::PathBuf;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use mythos_auth::AuthUser;
+use mythos_db::SubtitleRepo;
 use mythos_stream::{
     SEGMENT_WAIT_TIMEOUT, SessionKey, TranscodeError, TranscodeManager, build_master_playlist,
     build_variant_playlist, is_known_variant, parse_segment_filename, rendition_by_name,
     wait_for_file,
 };
+use serde::Deserialize;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
@@ -38,6 +40,15 @@ use crate::error::{ApiError, ApiResult};
 
 #[derive(Clone, Default)]
 pub struct HlsHandle(pub Option<TranscodeManager>);
+
+#[derive(Debug, Default, Deserialize)]
+pub struct HlsQuery {
+    /// UUID of the subtitle track to burn in. Only honoured when the
+    /// track is image-based (PGS/VOBSUB/...); text subs are served as
+    /// WebVTT sidecars and don't affect the transcode.
+    #[serde(default)]
+    pub sub: Option<Uuid>,
+}
 
 pub async fn stop(
     State(hls): State<HlsHandle>,
@@ -59,11 +70,13 @@ pub async fn master(
     State(pool): State<SqlitePool>,
     _user: AuthUser,
     Path(movie_id): Path<Uuid>,
+    Query(q): Query<HlsQuery>,
 ) -> ApiResult<Response> {
     // Validate the movie exists and has a known duration so we don't
     // hand the player a master that points at variants we can't serve.
     movie_duration_seconds(&pool, movie_id).await?;
-    let body = build_master_playlist();
+    let query = playlist_query_for_sub(&pool, movie_id, q.sub).await?;
+    let body = build_master_playlist(&query);
     Ok(playlist_response(body))
 }
 
@@ -74,6 +87,7 @@ pub async fn variant_file(
     State(hls): State<HlsHandle>,
     user: AuthUser,
     Path((movie_id, variant, filename)): Path<(Uuid, String, String)>,
+    Query(q): Query<HlsQuery>,
 ) -> ApiResult<Response> {
     if !is_known_variant(&variant) {
         return Err(ApiError::new(StatusCode::NOT_FOUND, "unknown_variant"));
@@ -83,7 +97,8 @@ pub async fn variant_file(
         let duration = movie_duration_seconds(&pool, movie_id).await?;
         let rendition = rendition_by_name(&variant)
             .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "unknown_variant"))?;
-        let body = build_variant_playlist(duration, rendition);
+        let query = playlist_query_for_sub(&pool, movie_id, q.sub).await?;
+        let body = build_variant_playlist(duration, rendition, &query);
         return Ok(playlist_response(body));
     }
 
@@ -96,13 +111,14 @@ pub async fn variant_file(
         .ok_or_else(|| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "transcoding_disabled"))?;
 
     let abs_path = resolve_input_path(&pool, movie_id).await?;
+    let burn_in_sub = resolve_burn_in_sub(&pool, movie_id, q.sub).await?;
     let key = SessionKey {
         user_id: user.id,
         movie_id,
     };
 
     let session = manager
-        .ensure_session_for_segment(key, &abs_path, &variant, seg_idx)
+        .ensure_session_for_segment(key, &abs_path, &variant, seg_idx, burn_in_sub)
         .await
         .map_err(map_transcode_error)?;
 
@@ -118,6 +134,70 @@ pub async fn variant_file(
         .map_err(map_transcode_error)?;
 
     serve_bytes(&segment_path, "video/mp2t").await
+}
+
+/// Build the query-string suffix appended to URLs in the synthetic
+/// playlists. Empty when no sub is selected; `"?sub=<uuid>"` when an
+/// image sub is selected; empty when a text sub is selected (text
+/// subs go via WebVTT sidecar, not burn-in).
+///
+/// Returns a 404 if the sub_id doesn't exist or doesn't belong to
+/// the movie.
+async fn playlist_query_for_sub(
+    pool: &SqlitePool,
+    movie_id: Uuid,
+    sub: Option<Uuid>,
+) -> ApiResult<String> {
+    let Some(sub_id) = sub else {
+        return Ok(String::new());
+    };
+    let track = lookup_sub_for_movie(pool, movie_id, sub_id).await?;
+    if track.is_image {
+        Ok(format!("?sub={sub_id}"))
+    } else {
+        Ok(String::new())
+    }
+}
+
+/// Translate the `?sub=<uuid>` query into the absolute ffprobe stream
+/// index the transcoder needs, or `None` if no sub was requested or
+/// the requested sub is text (text subs go via WebVTT sidecar).
+async fn resolve_burn_in_sub(
+    pool: &SqlitePool,
+    movie_id: Uuid,
+    sub: Option<Uuid>,
+) -> ApiResult<Option<i64>> {
+    let Some(sub_id) = sub else {
+        return Ok(None);
+    };
+    let track = lookup_sub_for_movie(pool, movie_id, sub_id).await?;
+    Ok(track.is_image.then_some(track.stream_index))
+}
+
+async fn lookup_sub_for_movie(
+    pool: &SqlitePool,
+    movie_id: Uuid,
+    sub_id: Uuid,
+) -> ApiResult<mythos_core::SubtitleTrack> {
+    let movie_file: Option<(String,)> = sqlx::query_as("SELECT file_id FROM movies WHERE id = ?")
+        .bind(movie_id.to_string())
+        .fetch_optional(pool)
+        .await
+        .map_err(|err| {
+            tracing::error!(?err, "movie file lookup failed");
+            ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal")
+        })?;
+    let file_id_str = movie_file
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "not_found"))?
+        .0;
+    let track = SubtitleRepo::new(pool.clone())
+        .find_by_id(sub_id)
+        .await?
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "unknown_subtitle"))?;
+    if track.file_id.to_string() != file_id_str {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "unknown_subtitle"));
+    }
+    Ok(track)
 }
 
 fn playlist_response(body: String) -> Response {

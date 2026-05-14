@@ -4,6 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::subtitle::NewSubtitle;
+
 /// Technical metadata about a single media file, populated from ffprobe.
 ///
 /// All fields are `Option` because ffprobe may be missing or fail on a
@@ -17,6 +19,11 @@ pub struct Probe {
     pub duration_seconds: Option<f64>,
     pub width: Option<i64>,
     pub height: Option<i64>,
+    /// Subtitle streams found by ffprobe. Empty when no tracks exist
+    /// or ffprobe failed; the scanner clears existing rows and
+    /// reinserts these on every successful re-scan.
+    #[serde(default)]
+    pub subtitles: Vec<NewSubtitle>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

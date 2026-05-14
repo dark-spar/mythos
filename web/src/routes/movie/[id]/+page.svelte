@@ -12,8 +12,10 @@
 		getMovie,
 		putProgress,
 		sendProgressBeacon,
+		subtitleLabel,
 		type CompatIssue,
-		type MovieDetail
+		type MovieDetail,
+		type SubtitleTrack
 	} from '$lib/movies';
 
 	let detail = $state<MovieDetail | null>(null);
@@ -28,9 +30,28 @@
 	let usingHls = $state(false);
 	let hls: Hls | null = null;
 
+	/// User's subtitle selection. `null` = off. The actual track is
+	/// looked up in `detail.subtitles` so storage just holds the id.
+	/// Persisted per-movie in localStorage so a user who always wants
+	/// English subs doesn't have to pick every time.
+	let selectedSubId = $state<string | null>(null);
+
 	const SAVE_INTERVAL_MS = 10_000;
 
 	const id = $derived(page.params.id as string);
+
+	const selectedSub = $derived<SubtitleTrack | null>(
+		detail && selectedSubId ? (detail.subtitles.find((s) => s.id === selectedSubId) ?? null) : null
+	);
+	/// Image subs ride along inside the HLS transcode. A change in
+	/// this value re-attaches the player; a change in `textSub` alone
+	/// only swaps the `<track>` element.
+	const imageSubId = $derived<string | null>(
+		selectedSub && selectedSub.is_image ? selectedSub.id : null
+	);
+	const textSub = $derived<SubtitleTrack | null>(
+		selectedSub && !selectedSub.is_image ? selectedSub : null
+	);
 
 	$effect(() => {
 		const currentId = id;
@@ -40,10 +61,18 @@
 			detail = null;
 			initialPosition = null;
 			lastSavedAt = 0;
+			selectedSubId = null;
 			try {
 				detail = await getMovie(currentId);
 				if (detail.progress && detail.progress.position_seconds > 1) {
 					initialPosition = detail.progress.position_seconds;
+				}
+				// Restore the user's last subtitle choice for this movie,
+				// dropping the saved value if the track is no longer in
+				// the file's subtitle list (e.g. rescanned away).
+				const saved = loadSavedSub(currentId);
+				if (saved && detail.subtitles.some((s) => s.id === saved)) {
+					selectedSubId = saved;
 				}
 			} catch (e) {
 				error =
@@ -62,19 +91,26 @@
 
 	// Attach a player implementation once both the <video> element and
 	// the movie metadata are ready. Re-runs (and cleans up) when either
-	// changes — navigating between movies, etc.
+	// changes — navigating between movies, toggling an image subtitle
+	// on/off, etc. Text-subtitle changes don't trigger this; the
+	// `<track>` element handles them client-side without disturbing the
+	// transcode.
 	$effect(() => {
 		if (!videoEl || !detail) return;
 		// Capture the id here so the cleanup closure can tell the server
 		// which session to stop even after `detail` has been reset.
 		const movieId = detail.movie.id;
-		attachPlayer(videoEl, detail);
+		const burnInSubId = imageSubId;
+		attachPlayer(videoEl, detail, burnInSubId);
 		return () => detachPlayer(movieId);
 	});
 
-	function attachPlayer(el: HTMLVideoElement, d: MovieDetail) {
+	function attachPlayer(el: HTMLVideoElement, d: MovieDetail, burnInSubId: string | null) {
 		const issues = browserCompatIssues(d.file);
-		if (issues.length === 0) {
+		// Image subs require burn-in via the transcoder, so we have to
+		// take the HLS path even if the file would otherwise direct-play.
+		const forceHls = burnInSubId != null;
+		if (issues.length === 0 && !forceHls) {
 			// Direct play: range-served raw file. The native <video>
 			// element handles seeking by issuing fresh Range requests.
 			usingHls = false;
@@ -88,7 +124,8 @@
 		// path — the server starts/restarts the transcoder as the player
 		// requests new segments.
 		usingHls = true;
-		const playlistUrl = `/api/movies/${d.movie.id}/hls/master.m3u8`;
+		const params = burnInSubId ? `?sub=${burnInSubId}` : '';
+		const playlistUrl = `/api/movies/${d.movie.id}/hls/master.m3u8${params}`;
 
 		// Prefer hls.js whenever MSE is available. Some browsers
 		// (Firefox on Android in particular) return non-empty
@@ -293,6 +330,27 @@
 		}
 	}
 
+	function loadSavedSub(movieId: string): string | null {
+		try {
+			return localStorage.getItem(`mythos:sub:${movieId}`) || null;
+		} catch {
+			return null;
+		}
+	}
+
+	function saveSub(movieId: string, subId: string | null): void {
+		try {
+			if (subId) localStorage.setItem(`mythos:sub:${movieId}`, subId);
+			else localStorage.removeItem(`mythos:sub:${movieId}`);
+		} catch {
+			// localStorage disabled (private mode etc.) — ignore
+		}
+	}
+
+	$effect(() => {
+		if (detail) saveSub(detail.movie.id, selectedSubId);
+	});
+
 	const compatIssues = $derived(detail ? browserCompatIssues(detail.file) : []);
 
 	onMount(() => {
@@ -334,8 +392,12 @@
 		<p class="mt-8 font-mono text-rose-500">{error}</p>
 	{:else if detail}
 		<section class="mt-4 overflow-hidden rounded-lg bg-black">
-			<!-- Subtitle / caption tracks are a Phase 3+ feature; user-supplied
-			     media has no guaranteed caption source. -->
+			<!--
+				Text subtitle tracks render here via <track>. Image subs
+				(PGS/VOBSUB) are burned into the transcode by the server
+				instead and never appear in this element. The `default`
+				attribute auto-selects the track on load.
+			-->
 			<video
 				bind:this={videoEl}
 				controls
@@ -345,9 +407,36 @@
 				ontimeupdate={handleTimeUpdate}
 				onpause={handlePause}
 			>
+				{#if textSub}
+					<track
+						kind="subtitles"
+						src="/api/movies/{detail.movie.id}/subtitles/{textSub.id}/vtt"
+						srclang={textSub.language ?? 'und'}
+						label={subtitleLabel(textSub)}
+						default
+					/>
+				{/if}
 				Your browser can't play this file directly.
 			</video>
 		</section>
+		{#if detail.subtitles.length > 0}
+			<div class="mt-3 flex items-center gap-2 text-sm">
+				<label for="subtitle-select" class="text-zinc-500">Subtitles</label>
+				<select
+					id="subtitle-select"
+					bind:value={selectedSubId}
+					class="rounded border border-zinc-300 bg-white px-2 py-1 text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+				>
+					<option value={null}>Off</option>
+					{#each detail.subtitles as sub (sub.id)}
+						<option value={sub.id}>{subtitleLabel(sub)}</option>
+					{/each}
+				</select>
+				{#if selectedSub?.is_image}
+					<span class="text-xs text-zinc-500">— burning into stream</span>
+				{/if}
+			</div>
+		{/if}
 		{#if compatIssues.length > 0}
 			{#if usingHls}
 				<div

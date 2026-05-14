@@ -14,8 +14,8 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use mythos_auth::AuthUser;
-use mythos_core::{MediaFile, Movie, WatchProgress};
-use mythos_db::{MediaFileRepo, MovieRepo, ProgressRepo};
+use mythos_core::{MediaFile, Movie, SubtitleTrack, WatchProgress};
+use mythos_db::{MediaFileRepo, MovieRepo, ProgressRepo, SubtitleRepo};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -55,6 +55,9 @@ pub struct MovieDetail {
     /// Per-user resume point. `None` when the requesting user has not
     /// played this movie yet.
     pub progress: Option<WatchProgress>,
+    /// All subtitle tracks the scanner found on the underlying file.
+    /// Empty when no tracks are present.
+    pub subtitles: Vec<SubtitleTrack>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,12 +103,14 @@ pub async fn get_one(
         .await?
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "file_missing"))?;
 
-    let progress = ProgressRepo::new(pool).find(user.id, id).await?;
+    let progress = ProgressRepo::new(pool.clone()).find(user.id, id).await?;
+    let subtitles = SubtitleRepo::new(pool).list_by_file(file.id).await?;
 
     Ok(Json(MovieDetail {
         movie,
         file,
         progress,
+        subtitles,
     }))
 }
 

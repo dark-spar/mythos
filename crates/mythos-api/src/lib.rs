@@ -6,6 +6,7 @@ pub mod hls;
 pub mod library;
 pub mod movie;
 pub mod scan;
+pub mod subtitles;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -84,6 +85,10 @@ pub fn router(state: ApiState) -> Router {
             get(hls::variant_file),
         )
         .route("/api/movies/{id}/hls", axum::routing::delete(hls::stop))
+        .route(
+            "/api/movies/{id}/subtitles/{sub_id}/vtt",
+            get(subtitles::webvtt),
+        )
         .route(
             "/api/movies/{id}/progress",
             axum::routing::put(movie::put_progress),

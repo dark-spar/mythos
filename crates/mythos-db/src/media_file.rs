@@ -42,6 +42,9 @@ impl MediaFileRow {
                 duration_seconds: self.duration_seconds,
                 width: self.width,
                 height: self.height,
+                // Subtitles aren't carried alongside the MediaFile row;
+                // SubtitleRepo fetches them per-file when needed.
+                subtitles: Vec::new(),
             },
             scanned_at: parse_ts("media_file scanned_at", &self.scanned_at)?,
         })
@@ -80,10 +83,16 @@ impl MediaFileRepo {
     /// Insert or refresh a media file. Returns whether this call inserted
     /// a new row (`true`) or updated an existing one (`false`), along
     /// with the resulting row.
+    ///
+    /// Subtitle rows for the file are replaced (delete-then-insert) in
+    /// the same transaction so a rescan that finds different tracks
+    /// (or none) doesn't leave stale ones behind.
     pub async fn upsert(&self, new: NewMediaFile) -> Result<(MediaFile, bool)> {
         let new_id = Uuid::now_v7();
         let path = path_to_str(&new.path)?;
         let mtime = ts_string(new.mtime);
+
+        let mut tx = self.pool.begin().await?;
 
         let row: MediaFileRow = sqlx::query_as(
             "INSERT INTO media_files \
@@ -115,8 +124,35 @@ impl MediaFileRepo {
         .bind(new.probe.duration_seconds)
         .bind(new.probe.width)
         .bind(new.probe.height)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
+
+        sqlx::query("DELETE FROM media_subtitles WHERE file_id = ?")
+            .bind(&row.id)
+            .execute(&mut *tx)
+            .await?;
+
+        for sub in &new.probe.subtitles {
+            sqlx::query(
+                "INSERT INTO media_subtitles \
+                   (id, file_id, stream_index, codec, language, title, \
+                    is_image, is_default, is_forced) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(Uuid::now_v7().to_string())
+            .bind(&row.id)
+            .bind(sub.stream_index)
+            .bind(&sub.codec)
+            .bind(sub.language.as_deref())
+            .bind(sub.title.as_deref())
+            .bind(i64::from(sub.is_image))
+            .bind(i64::from(sub.is_default))
+            .bind(i64::from(sub.is_forced))
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
 
         let inserted = row.id == new_id.to_string();
         Ok((row.into_media_file()?, inserted))

@@ -70,7 +70,7 @@ async fn ensure_session_produces_first_segment() {
 
     let manager = TranscodeManager::new(work_dir.path().to_path_buf(), mythos_stream::HwAccel::Cpu);
     let session = manager
-        .ensure_session_for_segment(key(), &input, "480p", 0)
+        .ensure_session_for_segment(key(), &input, "480p", 0, None)
         .await
         .expect("ensure_session_for_segment");
     assert_eq!(session.start_segment, 0);
@@ -86,11 +86,11 @@ async fn same_segment_reuses_existing_session() {
     let manager = TranscodeManager::new(work_dir.path().to_path_buf(), mythos_stream::HwAccel::Cpu);
 
     let first = manager
-        .ensure_session_for_segment(k.clone(), &input, "480p", 0)
+        .ensure_session_for_segment(k.clone(), &input, "480p", 0, None)
         .await
         .unwrap();
     let second = manager
-        .ensure_session_for_segment(k.clone(), &input, "480p", 0)
+        .ensure_session_for_segment(k.clone(), &input, "480p", 0, None)
         .await
         .unwrap();
 
@@ -110,7 +110,7 @@ async fn segment_before_session_start_forces_restart() {
     let manager = TranscodeManager::new(work_dir.path().to_path_buf(), mythos_stream::HwAccel::Cpu);
 
     let first = manager
-        .ensure_session_for_segment(k.clone(), &input, "480p", 1)
+        .ensure_session_for_segment(k.clone(), &input, "480p", 1, None)
         .await
         .unwrap();
     let first_started = first.started_at;
@@ -119,7 +119,7 @@ async fn segment_before_session_start_forces_restart() {
     // Inside the startup grace period, an incompatible request errors
     // rather than killing the in-flight session.
     match manager
-        .ensure_session_for_segment(k.clone(), &input, "480p", 0)
+        .ensure_session_for_segment(k.clone(), &input, "480p", 0, None)
         .await
     {
         Err(mythos_stream::TranscodeError::SessionStillBooting) => {}
@@ -131,7 +131,7 @@ async fn segment_before_session_start_forces_restart() {
     // does restart cleanly.
     tokio::time::sleep(std::time::Duration::from_secs(4)).await;
     let second = manager
-        .ensure_session_for_segment(k, &input, "480p", 0)
+        .ensure_session_for_segment(k, &input, "480p", 0, None)
         .await
         .unwrap();
     assert!(
@@ -149,7 +149,7 @@ async fn local_segment_path_maps_global_index_to_session_local() {
     let manager = TranscodeManager::new(work_dir.path().to_path_buf(), mythos_stream::HwAccel::Cpu);
 
     let session = manager
-        .ensure_session_for_segment(key(), &input, "480p", 3)
+        .ensure_session_for_segment(key(), &input, "480p", 3, None)
         .await
         .unwrap();
     // Session started at global seg 3 — global 3 is seg-0.ts on disk.
@@ -169,7 +169,7 @@ async fn stop_removes_session_and_cleans_workdir() {
     let manager = TranscodeManager::new(work_dir.path().to_path_buf(), mythos_stream::HwAccel::Cpu);
 
     let session = manager
-        .ensure_session_for_segment(k.clone(), &input, "480p", 0)
+        .ensure_session_for_segment(k.clone(), &input, "480p", 0, None)
         .await
         .unwrap();
     let session_workdir = session.work_dir.clone();

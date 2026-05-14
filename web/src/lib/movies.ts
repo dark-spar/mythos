@@ -51,10 +51,35 @@ export interface WatchProgress {
 	updated_at: string;
 }
 
+export interface SubtitleTrack {
+	id: string;
+	file_id: string;
+	stream_index: number;
+	codec: string;
+	language: string | null;
+	title: string | null;
+	is_image: boolean;
+	is_default: boolean;
+	is_forced: boolean;
+}
+
 export interface MovieDetail {
 	movie: Movie;
 	file: MediaFile;
 	progress: WatchProgress | null;
+	subtitles: SubtitleTrack[];
+}
+
+/// Human-friendly label for a subtitle track. Falls back through
+/// title → language → codec so the dropdown always says something
+/// useful.
+export function subtitleLabel(sub: SubtitleTrack): string {
+	const base = sub.title || sub.language?.toUpperCase() || sub.codec;
+	const kind = sub.is_image ? 'image' : 'text';
+	const tags: string[] = [kind];
+	if (sub.is_forced) tags.push('forced');
+	if (sub.is_default) tags.push('default');
+	return `${base} (${tags.join(', ')})`;
 }
 
 export const putProgress = (

@@ -1,4 +1,4 @@
-import { apiGet, apiPut } from './api';
+import { apiGet, apiPost, apiPut } from './api';
 
 export interface Probe {
 	container: string | null;
@@ -70,6 +70,45 @@ export interface MovieDetail {
 	subtitles: SubtitleTrack[];
 }
 
+export interface VideoCodecCap {
+	codec: string;
+	profile: string | null;
+	level: number | null;
+}
+
+export interface AudioCodecCap {
+	codec: string;
+	max_channels: number | null;
+}
+
+export interface ClientProfile {
+	containers: string[];
+	video_codecs: VideoCodecCap[];
+	audio_codecs: AudioCodecCap[];
+	max_width: number | null;
+	max_height: number | null;
+	max_audio_channels: number | null;
+}
+
+export type PlaybackMode =
+	| 'direct_play'
+	| 'remux'
+	| 'transcode_audio'
+	| 'transcode_video'
+	| 'transcode_full';
+
+export interface PlayResponse {
+	mode: PlaybackMode;
+	stream_url: string;
+	allowed_renditions: string[];
+	diagnostic: {
+		container_ok: boolean;
+		video_ok: boolean;
+		audio_ok: boolean;
+		resolution_ok: boolean;
+	};
+}
+
 /// Human-friendly label for a subtitle track. Falls back through
 /// title → language → codec so the dropdown always says something
 /// useful.
@@ -129,6 +168,12 @@ export const listMovies = (
 };
 
 export const getMovie = (id: string): Promise<MovieDetail> => apiGet(`/api/movies/${id}`);
+
+/// Ask the server how to play a movie given this client's declared
+/// capabilities. The response carries the URL to load and the
+/// chosen pipeline mode (direct-play / remux / transcode-*).
+export const requestPlay = (id: string, profile: ClientProfile): Promise<PlayResponse> =>
+	apiPost(`/api/movies/${id}/play`, profile);
 
 export function formatDuration(seconds: number | null): string {
 	if (seconds == null) return '—';

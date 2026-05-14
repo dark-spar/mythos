@@ -75,12 +75,45 @@ pub const ABR_LADDER: &[Rendition] = &[
     },
 ];
 
+/// Variant name reserved for copy-mode sessions (Remux,
+/// TranscodeAudio) where there's no scaling and only one output. The
+/// master playlist for those modes lists a single STREAM-INF
+/// pointing at this name.
+pub const SOURCE_VARIANT: &str = "source";
+
 pub fn rendition_by_name(name: &str) -> Option<&'static Rendition> {
     ABR_LADDER.iter().find(|r| r.name == name)
 }
 
 pub fn is_known_variant(name: &str) -> bool {
-    rendition_by_name(name).is_some()
+    rendition_by_name(name).is_some() || name == SOURCE_VARIANT
+}
+
+/// Build a synthetic rendition representing the source as-is. Used
+/// in copy modes (Remux, TranscodeAudio) where ffmpeg passes pixels
+/// through without scaling. The bandwidth hint is the source's
+/// average bitrate, estimated from `size_bytes / duration_seconds`.
+pub fn source_rendition(
+    width: u32,
+    height: u32,
+    size_bytes: u64,
+    duration_seconds: f64,
+) -> Rendition {
+    let avg_kbps = if duration_seconds > 0.0 {
+        ((size_bytes as f64 * 8.0 / duration_seconds) / 1000.0) as u32
+    } else {
+        6000
+    };
+    Rendition {
+        name: SOURCE_VARIANT,
+        width: width.max(1),
+        height: height.max(1),
+        // Carry the source-average split arbitrarily across video +
+        // audio for the bandwidth-hint calculation; we don't use the
+        // individual fields when copying.
+        video_bitrate_kbps: avg_kbps.saturating_sub(128).max(1),
+        audio_bitrate_kbps: 128,
+    }
 }
 
 /// The variant used as a default when one isn't otherwise selected

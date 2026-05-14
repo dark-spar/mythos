@@ -5,6 +5,7 @@ pub mod error;
 pub mod hls;
 pub mod library;
 pub mod movie;
+pub mod play;
 pub mod scan;
 pub mod subtitles;
 
@@ -79,6 +80,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/movies/{id}", get(movie::get_one))
         .route("/api/movies/{id}/poster", get(movie::poster))
         .route("/api/movies/{id}/stream", get(movie::stream))
+        .route("/api/movies/{id}/play", post(play::play))
         .route("/api/movies/{id}/hls/master.m3u8", get(hls::master))
         .route(
             "/api/movies/{id}/hls/{variant}/{filename}",

@@ -27,6 +27,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use mythos_core::PlaybackMode;
 use thiserror::Error;
 use tokio::io::AsyncBufReadExt;
 use tokio::process::{Child, Command};
@@ -34,7 +35,7 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info};
 use uuid::Uuid;
 
-use crate::abr::{ABR_LADDER, Rendition, is_known_variant};
+use crate::abr::{Rendition, is_known_variant};
 use crate::hwaccel::HwAccel;
 
 /// Target HLS segment duration in seconds. Anything that builds the
@@ -100,6 +101,15 @@ pub struct TranscodeSession {
     /// for this session, or `None` if subs are off. A request with a
     /// different value forces a restart, same as a backward seek.
     pub burn_in_sub: Option<i64>,
+    /// Playback mode this session was launched for. Toggling
+    /// direct-play/remux/transcode-* is a restart trigger because
+    /// the ffmpeg invocation differs per mode.
+    pub mode: PlaybackMode,
+    /// Renditions emitted by ffmpeg in this session. Names match the
+    /// `%v` subdirectories under `work_dir`. For copy modes this is
+    /// a single source-resolution rendition; for ABR modes a subset
+    /// of [`crate::ABR_LADDER`].
+    pub renditions: Vec<Rendition>,
     pub work_dir: PathBuf,
     pub started_at: Instant,
     last_access: Mutex<Instant>,
@@ -209,10 +219,10 @@ impl TranscodeManager {
     }
 
     /// Return a session that's either currently transcoding segment
-    /// `seg_idx` or will be very shortly. Restarts the session if the
-    /// requested segment is before its start, too far past its
-    /// frontier, or has a different `burn_in_sub` selection; reuses
-    /// otherwise.
+    /// `seg_idx` or will be very shortly. Restarts the session if any
+    /// of the following differ from the existing one: `seg_idx`
+    /// (before-start or too-far-ahead), `burn_in_sub`, `mode`, or
+    /// the rendition list.
     ///
     /// If the existing session is younger than
     /// [`RESTART_GRACE_PERIOD`] and the requested segment isn't
@@ -221,6 +231,7 @@ impl TranscodeManager {
     /// that into a 503 + `Retry-After`, which protects the manager
     /// from clients (forgotten tabs, video extensions, etc.) issuing
     /// rapid segment requests across the timeline.
+    #[allow(clippy::too_many_arguments)]
     pub async fn ensure_session_for_segment(
         &self,
         key: SessionKey,
@@ -228,16 +239,29 @@ impl TranscodeManager {
         variant: &str,
         seg_idx: u32,
         burn_in_sub: Option<i64>,
+        mode: PlaybackMode,
+        renditions: &[Rendition],
     ) -> Result<Arc<TranscodeSession>, TranscodeError> {
-        if !is_known_variant(variant) {
+        if mode == PlaybackMode::DirectPlay {
+            // The HLS pipeline only services transcoding/remuxing
+            // modes; direct-play is served by a separate handler.
+            return Err(TranscodeError::InvalidVariant(
+                "direct_play has no transcode session".to_string(),
+            ));
+        }
+        if !renditions.iter().any(|r| r.name == variant) {
             return Err(TranscodeError::InvalidVariant(variant.to_string()));
         }
         // Fast path: existing session covers this segment AND has the
-        // same subtitle selection.
+        // same subtitle / mode / rendition selection.
         let needs_restart = {
             let sessions = self.inner.sessions.read().await;
             match sessions.get(&key) {
-                Some(existing) if existing.burn_in_sub != burn_in_sub => {
+                Some(existing)
+                    if existing.burn_in_sub != burn_in_sub
+                        || existing.mode != mode
+                        || !rendition_names_match(&existing.renditions, renditions) =>
+                {
                     if existing.started_at.elapsed() < RESTART_GRACE_PERIOD {
                         return Err(TranscodeError::SessionStillBooting);
                     }
@@ -275,7 +299,8 @@ impl TranscodeManager {
             // Logically unreachable, but spell it out for clarity.
             return Err(TranscodeError::Timeout);
         }
-        self.restart_at(key, input_path, seg_idx, burn_in_sub).await
+        self.restart_at(key, input_path, seg_idx, burn_in_sub, mode, renditions)
+            .await
     }
 
     /// Start a fresh session at `seg_idx`, killing any existing session
@@ -286,6 +311,8 @@ impl TranscodeManager {
         input_path: &Path,
         seg_idx: u32,
         burn_in_sub: Option<i64>,
+        mode: PlaybackMode,
+        renditions: &[Rendition],
     ) -> Result<Arc<TranscodeSession>, TranscodeError> {
         let mut sessions = self.inner.sessions.write().await;
         if let Some(existing) = sessions.remove(&key) {
@@ -308,26 +335,28 @@ impl TranscodeManager {
         tokio::fs::create_dir_all(&work_dir).await?;
         // ffmpeg's HLS muxer doesn't auto-create per-variant subdirs
         // when `%v` is in `-hls_segment_filename`; pre-create them.
-        for rendition in ABR_LADDER {
+        for rendition in renditions {
             tokio::fs::create_dir_all(work_dir.join(rendition.name)).await?;
         }
 
         let offset_seconds = f64::from(seg_idx) * SEGMENT_DURATION_SECS;
-        // Force the CPU pipeline when burning in image subs. The
-        // `overlay` filter on VAAPI-resident surfaces is brittle
-        // (driver/libva version sensitive) and the perf hit only
-        // shows when a user explicitly turns subs on.
-        let session_accel = match burn_in_sub {
-            Some(_) => HwAccel::Cpu,
-            None => self.inner.accel,
+        // Force the CPU pipeline when burning in image subs (the
+        // overlay-on-VAAPI path is brittle), and for any mode that
+        // doesn't re-encode video (the HW path is wasted overhead
+        // and `-c:v copy` doesn't go through the encoder anyway).
+        let session_accel = match (burn_in_sub, mode) {
+            (Some(_), _) => HwAccel::Cpu,
+            (_, PlaybackMode::Remux | PlaybackMode::TranscodeAudio) => HwAccel::Cpu,
+            _ => self.inner.accel,
         };
         info!(
             user = %key.user_id,
             movie = %key.movie_id,
             seg_idx,
             offset_seconds,
+            mode = mode.as_str(),
             encoder = session_accel.h264_encoder(),
-            renditions = ABR_LADDER.len(),
+            renditions = renditions.len(),
             burn_in_sub = ?burn_in_sub,
             "starting ffmpeg transcode session"
         );
@@ -338,6 +367,8 @@ impl TranscodeManager {
             offset_seconds,
             session_accel,
             burn_in_sub,
+            mode,
+            renditions,
         )
         .await
         .map_err(TranscodeError::Spawn)?;
@@ -346,6 +377,8 @@ impl TranscodeManager {
             key: key.clone(),
             start_segment: seg_idx,
             burn_in_sub,
+            mode,
+            renditions: renditions.to_vec(),
             work_dir,
             started_at: Instant::now(),
             last_access: Mutex::new(Instant::now()),
@@ -424,16 +457,25 @@ async fn launch_ffmpeg(
     offset_seconds: f64,
     accel: HwAccel,
     burn_in_sub: Option<i64>,
+    mode: PlaybackMode,
+    renditions: &[Rendition],
 ) -> std::io::Result<Child> {
     // Per-variant subdirs are pre-created by the caller. ffmpeg
     // expands `%v` in `-hls_segment_filename` and the output URL to
     // the variant name set in `-var_stream_map`.
     let segment_pattern = work_dir.join("%v").join("seg-%d.ts");
     let variant_playlist_pattern = work_dir.join("%v").join("playlist.m3u8");
+    let copy_video = matches!(mode, PlaybackMode::Remux | PlaybackMode::TranscodeAudio);
+    let copy_audio = matches!(mode, PlaybackMode::Remux | PlaybackMode::TranscodeVideo);
 
     let mut cmd = Command::new("ffmpeg");
     cmd.arg("-hide_banner").arg("-loglevel").arg("warning");
-    cmd.args(accel.decode_args());
+    if !copy_video {
+        // HW decode flags only matter when we're going to re-encode.
+        // For `-c:v copy`, the bitstream passes through and we want
+        // to avoid forcing the GPU pipeline.
+        cmd.args(accel.decode_args());
+    }
     // PGS subtitle events frequently lack a duration ("show until
     // next event"); -fix_sub_duration fills those in so overlay
     // displays them for the right amount of time.
@@ -446,43 +488,61 @@ async fn launch_ffmpeg(
         .arg("-i")
         .arg(input);
 
-    // Single decode → optional sub burn-in → split N ways → per-
-    // rendition scale. With VAAPI the split + scale all happen on the
-    // GPU; with libx264 they all happen on the CPU. Either way, one
-    // decode pass. When burn_in_sub is set the caller has already
-    // forced accel to Cpu.
-    cmd.arg("-filter_complex")
-        .arg(build_filter_complex(accel, burn_in_sub));
+    // Filter graph only applies when we're re-encoding video.
+    if !copy_video {
+        cmd.arg("-filter_complex")
+            .arg(build_filter_complex(accel, burn_in_sub, renditions));
+    }
 
-    // Map: each rendition gets the corresponding scaled video output
-    // [vN] + a copy of the source audio.
-    for i in 0..ABR_LADDER.len() {
-        cmd.arg("-map").arg(format!("[v{i}]"));
+    // Map: per output index, the right video + audio source.
+    for i in 0..renditions.len() {
+        if copy_video {
+            cmd.arg("-map").arg("0:v:0");
+        } else {
+            cmd.arg("-map").arg(format!("[v{i}]"));
+        }
         cmd.arg("-map").arg("0:a:0?");
     }
 
-    // Per-rendition video encoder args (codec, bitrate target,
-    // maxrate, bufsize, preset where applicable).
-    for (i, rendition) in ABR_LADDER.iter().enumerate() {
-        cmd.args(accel.abr_video_encoder_args(i, rendition));
+    // Video encoder args, per output, or `-c:v copy` when keeping
+    // the source bitstream.
+    if copy_video {
+        for i in 0..renditions.len() {
+            cmd.arg(format!("-c:v:{i}")).arg("copy");
+        }
+    } else {
+        for (i, rendition) in renditions.iter().enumerate() {
+            cmd.args(accel.abr_video_encoder_args(i, rendition));
+        }
     }
 
-    // Audio: AAC stereo, per-variant bitrate.
-    cmd.arg("-c:a").arg("aac").arg("-ac").arg("2");
-    for (i, rendition) in ABR_LADDER.iter().enumerate() {
-        cmd.arg(format!("-b:a:{i}"))
-            .arg(format!("{}k", rendition.audio_bitrate_kbps));
+    // Audio: copy bitstream or re-encode to AAC stereo.
+    if copy_audio {
+        for i in 0..renditions.len() {
+            cmd.arg(format!("-c:a:{i}")).arg("copy");
+        }
+    } else {
+        cmd.arg("-c:a").arg("aac").arg("-ac").arg("2");
+        for (i, rendition) in renditions.iter().enumerate() {
+            cmd.arg(format!("-b:a:{i}"))
+                .arg(format!("{}k", rendition.audio_bitrate_kbps));
+        }
     }
 
-    // PTS preservation + segment-boundary keyframes (see Phase 4
-    // commentary in git history for why each of these matters).
+    // PTS preservation. `-force_key_frames` is only meaningful when
+    // we're actually encoding video — with `-c:v copy` the keyframes
+    // are wherever the source put them, and ffmpeg uses the nearest
+    // one as each segment boundary (segments end up uneven, which
+    // hls.js tolerates).
     cmd.arg("-copyts")
         .arg("-muxdelay")
         .arg("0")
         .arg("-muxpreload")
-        .arg("0")
-        .arg("-force_key_frames")
-        .arg(format!("expr:gte(t,n_forced*{SEGMENT_DURATION_SECS})"));
+        .arg("0");
+    if !copy_video {
+        cmd.arg("-force_key_frames")
+            .arg(format!("expr:gte(t,n_forced*{SEGMENT_DURATION_SECS})"));
+    }
 
     // HLS muxer: write the per-variant playlists into `%v/playlist.m3u8`
     // and segments into `%v/seg-%d.ts`. We don't actually serve the
@@ -498,7 +558,7 @@ async fn launch_ffmpeg(
         .arg("-hls_flags")
         .arg("independent_segments")
         .arg("-var_stream_map")
-        .arg(build_var_stream_map())
+        .arg(build_var_stream_map(renditions))
         .arg("-master_pl_name")
         .arg("master.m3u8")
         .arg("-hls_segment_filename")
@@ -522,9 +582,14 @@ async fn launch_ffmpeg(
 
 /// Construct the `-filter_complex` argument that optionally burns a
 /// subtitle stream into the video, then splits the result N ways and
-/// scales each branch to one rendition.
-fn build_filter_complex(accel: HwAccel, burn_in_sub: Option<i64>) -> String {
-    let n = ABR_LADDER.len();
+/// scales each branch to one rendition. Only used when video is
+/// being re-encoded.
+fn build_filter_complex(
+    accel: HwAccel,
+    burn_in_sub: Option<i64>,
+    renditions: &[Rendition],
+) -> String {
+    let n = renditions.len();
 
     // With burn-in: overlay first, then split the composited frame.
     // Without burn-in: split the raw video stream directly. The label
@@ -542,12 +607,21 @@ fn build_filter_complex(accel: HwAccel, burn_in_sub: Option<i64>) -> String {
         None => "[0:v]",
     };
 
-    // <input>split=3[s0][s1][s2]
+    if n == 1 {
+        // No fan-out needed for a single rendition.
+        graph.push_str(&format!(
+            "{split_input}{}[v0]",
+            accel.scale_filter(&renditions[0])
+        ));
+        return graph;
+    }
+
+    // <input>split=N[s0][s1]...
     let split_labels: String = (0..n).map(|i| format!("[s{i}]")).collect();
     graph.push_str(&format!("{split_input}split={n}{split_labels}"));
 
     // ; [s0]scale=...[v0]; [s1]scale=...[v1]; ...
-    for (i, rendition) in ABR_LADDER.iter().enumerate() {
+    for (i, rendition) in renditions.iter().enumerate() {
         graph.push(';');
         graph.push_str(&format!("[s{i}]{}[v{i}]", accel.scale_filter(rendition)));
     }
@@ -555,15 +629,21 @@ fn build_filter_complex(accel: HwAccel, burn_in_sub: Option<i64>) -> String {
 }
 
 /// `-var_stream_map` value: pairs output indices to variant names.
-/// With 3 video outputs and 3 audio outputs, video stream `i` and
-/// audio stream `i` belong to variant `ABR_LADDER[i].name`.
-fn build_var_stream_map() -> String {
-    ABR_LADDER
+fn build_var_stream_map(renditions: &[Rendition]) -> String {
+    renditions
         .iter()
         .enumerate()
         .map(|(i, r)| format!("v:{i},a:{i},name:{}", r.name))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Return `true` if the two rendition slices describe the same set of
+/// variants (by name, order-sensitive). Bitrate / dimension drift on
+/// the same name still counts as a match — the same session can
+/// keep running.
+fn rendition_names_match(a: &[Rendition], b: &[Rendition]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.name == y.name)
 }
 
 /// Parse `seg-N.ts` into `N`. Anything else (including
@@ -573,21 +653,21 @@ pub fn parse_segment_filename(name: &str) -> Option<u32> {
     rest.parse::<u32>().ok()
 }
 
-/// Synthetic ABR master playlist. Lists every rendition in
-/// [`ABR_LADDER`] with its declared bandwidth + resolution +
-/// codecs hint. Relative URLs point at `:variant/playlist.m3u8`
-/// served by the API; the player fetches whichever it picks.
+/// Synthetic ABR master playlist. Lists each provided rendition
+/// with its declared bandwidth + resolution + codecs hint. Relative
+/// URLs point at `:variant/playlist.m3u8` served by the API; the
+/// player fetches whichever it picks.
 ///
 /// `query` is appended verbatim to each variant URL (e.g.
-/// `"?sub=<uuid>"`), so a sub selection from the master URL
-/// propagates to the variant playlist requests. Relative URL
+/// `"?mode=full&sub=<uuid>"`), so selections from the master URL
+/// propagate to the variant playlist requests. Relative URL
 /// resolution in HLS clients drops the query otherwise.
-pub fn build_master_playlist(query: &str) -> String {
+pub fn build_master_playlist(renditions: &[Rendition], query: &str) -> String {
     let mut p = String::new();
     p.push_str("#EXTM3U\n");
     p.push_str("#EXT-X-VERSION:6\n");
     p.push_str("#EXT-X-INDEPENDENT-SEGMENTS\n");
-    for r in ABR_LADDER {
+    for r in renditions {
         p.push_str(&format!(
             "#EXT-X-STREAM-INF:BANDWIDTH={},RESOLUTION={}x{},CODECS=\"{}\"\n",
             r.declared_bandwidth_bps(),
@@ -664,7 +744,7 @@ mod tests {
 
     #[test]
     fn variant_playlist_lists_every_segment_with_correct_durations() {
-        let p = build_variant_playlist(13.0, &ABR_LADDER[0], ""); // 6 + 6 + 1
+        let p = build_variant_playlist(13.0, &crate::ABR_LADDER[0], ""); // 6 + 6 + 1
         assert!(p.contains("seg-0.ts"));
         assert!(p.contains("seg-1.ts"));
         assert!(p.contains("seg-2.ts"));
@@ -676,7 +756,7 @@ mod tests {
 
     #[test]
     fn variant_playlist_with_exact_multiple_has_no_short_tail() {
-        let p = build_variant_playlist(12.0, &ABR_LADDER[0], "");
+        let p = build_variant_playlist(12.0, &crate::ABR_LADDER[0], "");
         assert!(p.contains("seg-0.ts"));
         assert!(p.contains("seg-1.ts"));
         assert!(!p.contains("seg-2.ts"));
@@ -684,22 +764,22 @@ mod tests {
 
     #[test]
     fn variant_playlist_with_zero_duration_is_empty() {
-        let p = build_variant_playlist(0.0, &ABR_LADDER[0], "");
+        let p = build_variant_playlist(0.0, &crate::ABR_LADDER[0], "");
         assert!(!p.contains("seg-"));
         assert!(p.contains("#EXT-X-ENDLIST"));
     }
 
     #[test]
     fn variant_playlist_propagates_query_to_segments() {
-        let p = build_variant_playlist(13.0, &ABR_LADDER[0], "?sub=abc");
+        let p = build_variant_playlist(13.0, &crate::ABR_LADDER[0], "?sub=abc");
         assert!(p.contains("seg-0.ts?sub=abc"));
         assert!(p.contains("seg-2.ts?sub=abc"));
     }
 
     #[test]
     fn master_playlist_lists_every_rendition() {
-        let p = build_master_playlist("");
-        for rendition in ABR_LADDER {
+        let p = build_master_playlist(crate::ABR_LADDER, "");
+        for rendition in crate::ABR_LADDER {
             assert!(p.contains(rendition.name));
             assert!(p.contains(&format!("{}x{}", rendition.width, rendition.height)));
         }
@@ -709,8 +789,17 @@ mod tests {
 
     #[test]
     fn master_playlist_propagates_query_to_variant_urls() {
-        let p = build_master_playlist("?sub=abc");
+        let p = build_master_playlist(crate::ABR_LADDER, "?sub=abc");
         assert!(p.contains("480p/playlist.m3u8?sub=abc"));
         assert!(p.contains("1080p/playlist.m3u8?sub=abc"));
+    }
+
+    #[test]
+    fn master_playlist_subset_drops_unincluded_tiers() {
+        let only_720 = vec![crate::ABR_LADDER[1]];
+        let p = build_master_playlist(&only_720, "");
+        assert!(p.contains("720p"));
+        assert!(!p.contains("480p"));
+        assert!(!p.contains("1080p"));
     }
 }

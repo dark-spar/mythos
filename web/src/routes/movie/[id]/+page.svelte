@@ -5,18 +5,19 @@
 	import { resolve } from '$app/paths';
 	import { ApiError } from '$lib/api';
 	import {
-		browserCompatIssues,
 		formatBytes,
 		formatDuration,
 		formatResolution,
 		getMovie,
 		putProgress,
+		requestPlay,
 		sendProgressBeacon,
 		subtitleLabel,
-		type CompatIssue,
 		type MovieDetail,
+		type PlayResponse,
 		type SubtitleTrack
 	} from '$lib/movies';
+	import { clientProfile } from '$lib/profile';
 
 	let detail = $state<MovieDetail | null>(null);
 	let loading = $state(true);
@@ -27,8 +28,11 @@
 	let lastSavedAt = 0;
 	let saveError = $state<string | null>(null);
 
-	let usingHls = $state(false);
 	let hls: Hls | null = null;
+	/// Latest server-side playback decision for the currently-loaded
+	/// movie. The diagnostic banner and the "what's actually
+	/// happening" subtitle hint read from here.
+	let playPlan = $state<PlayResponse | null>(null);
 
 	/// User's subtitle selection. `null` = off. The actual track is
 	/// looked up in `detail.subtitles` so storage just holds the id.
@@ -101,31 +105,58 @@
 		// which session to stop even after `detail` has been reset.
 		const movieId = detail.movie.id;
 		const burnInSubId = imageSubId;
-		attachPlayer(videoEl, detail, burnInSubId);
-		return () => detachPlayer(movieId);
+		const el = videoEl;
+		const d = detail;
+		let cancelled = false;
+		(async () => {
+			await attachPlayer(el, d, burnInSubId, () => cancelled);
+		})();
+		return () => {
+			cancelled = true;
+			detachPlayer(movieId);
+		};
 	});
 
-	function attachPlayer(el: HTMLVideoElement, d: MovieDetail, burnInSubId: string | null) {
-		const issues = browserCompatIssues(d.file);
-		// Image subs require burn-in via the transcoder, so we have to
-		// take the HLS path even if the file would otherwise direct-play.
-		const forceHls = burnInSubId != null;
-		if (issues.length === 0 && !forceHls) {
+	async function attachPlayer(
+		el: HTMLVideoElement,
+		d: MovieDetail,
+		burnInSubId: string | null,
+		isCancelled: () => boolean
+	) {
+		let plan: PlayResponse;
+		try {
+			plan = await requestPlay(d.movie.id, clientProfile());
+		} catch (e) {
+			saveError = e instanceof Error ? `Couldn't plan playback: ${e.message}` : 'planning failed';
+			return;
+		}
+		if (isCancelled()) return;
+		playPlan = plan;
+
+		let url = plan.stream_url;
+		if (burnInSubId && plan.mode === 'direct_play') {
+			// Burn-in requires the HLS encoder; override the
+			// direct-play URL with a full re-encode.
+			url = `/api/movies/${d.movie.id}/hls/master.m3u8?mode=transcode_full&sub=${burnInSubId}`;
+		} else if (burnInSubId) {
+			const joiner = url.includes('?') ? '&' : '?';
+			url = `${url}${joiner}sub=${burnInSubId}`;
+		}
+
+		const goingHls = plan.mode !== 'direct_play' || burnInSubId !== null;
+		if (!goingHls) {
 			// Direct play: range-served raw file. The native <video>
 			// element handles seeking by issuing fresh Range requests.
-			usingHls = false;
-			el.src = `/api/movies/${d.movie.id}/stream`;
+			el.src = url;
 			return;
 		}
 
-		// HLS fallback. The master describes every rendition; per-variant
-		// playlists describe the full movie up front (synthetic VOD), so
-		// seeking and resume work via the standard `currentTime = X`
-		// path — the server starts/restarts the transcoder as the player
-		// requests new segments.
-		usingHls = true;
-		const params = burnInSubId ? `?sub=${burnInSubId}` : '';
-		const playlistUrl = `/api/movies/${d.movie.id}/hls/master.m3u8${params}`;
+		// HLS path: master + variant + segments via hls.js. The master
+		// describes the renditions the server picked (or just a single
+		// source-resolution tier for copy modes); the per-variant
+		// playlist describes the full movie up front (synthetic VOD)
+		// so seeking and resume work without segment-level back-and-
+		// forth from the player.
 
 		// Prefer hls.js whenever MSE is available. Some browsers
 		// (Firefox on Android in particular) return non-empty
@@ -154,14 +185,14 @@
 				nudgeMaxRetry: 0,
 				highBufferWatchdogPeriod: 30
 			});
-			hls.loadSource(playlistUrl);
+			hls.loadSource(url);
 			hls.attachMedia(el);
 			return;
 		}
 
 		if (el.canPlayType('application/vnd.apple.mpegurl')) {
 			// Safari iOS without MSE — fall back to the native player.
-			el.src = playlistUrl;
+			el.src = url;
 			return;
 		}
 
@@ -319,14 +350,32 @@
 		}
 	}
 
-	function issueLabel(issue: CompatIssue): string {
-		switch (issue.kind) {
-			case 'container':
-				return `Container .${issue.value}`;
-			case 'video_codec':
-				return `Video codec ${issue.value}`;
-			case 'audio_codec':
-				return `Audio codec ${issue.value}`;
+	/// Phrases describing which dimensions made the server pick a
+	/// transcode/remux mode. Read off the diagnostic the `/play`
+	/// endpoint returns so the banner says what's actually
+	/// happening rather than what we guessed client-side.
+	function transcodeReasons(plan: PlayResponse): string[] {
+		const d = plan.diagnostic;
+		const out: string[] = [];
+		if (!d.container_ok) out.push('container');
+		if (!d.video_ok) out.push('video codec');
+		if (!d.audio_ok) out.push('audio codec');
+		if (!d.resolution_ok) out.push('resolution');
+		return out;
+	}
+
+	function modeLabel(mode: PlayResponse['mode']): string {
+		switch (mode) {
+			case 'direct_play':
+				return 'Direct play';
+			case 'remux':
+				return 'Remuxing (no re-encode)';
+			case 'transcode_audio':
+				return 'Re-encoding audio only';
+			case 'transcode_video':
+				return 'Re-encoding video only';
+			case 'transcode_full':
+				return 'Transcoding';
 		}
 	}
 
@@ -351,7 +400,7 @@
 		if (detail) saveSub(detail.movie.id, selectedSubId);
 	});
 
-	const compatIssues = $derived(detail ? browserCompatIssues(detail.file) : []);
+	const reasons = $derived(playPlan ? transcodeReasons(playPlan) : []);
 
 	onMount(() => {
 		document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -437,36 +486,25 @@
 				{/if}
 			</div>
 		{/if}
-		{#if compatIssues.length > 0}
-			{#if usingHls}
-				<div
-					class="mt-2 rounded border border-sky-300 bg-sky-50 p-3 text-xs text-sky-900 dark:border-sky-700 dark:bg-sky-950 dark:text-sky-200"
-					role="status"
-				>
-					<p>Transcoding this file on the fly because your browser can't decode it natively:</p>
-					<ul class="mt-1 ml-4 list-disc">
-						{#each compatIssues as issue (issue.kind)}
-							<li><span class="font-mono">{issueLabel(issue)}</span></li>
-						{/each}
-					</ul>
+		{#if playPlan && playPlan.mode !== 'direct_play'}
+			<div
+				class="mt-2 rounded border border-sky-300 bg-sky-50 p-3 text-xs text-sky-900 dark:border-sky-700 dark:bg-sky-950 dark:text-sky-200"
+				role="status"
+			>
+				<p>
+					<span class="font-medium">{modeLabel(playPlan.mode)}</span>
+					{#if reasons.length > 0}
+						— your browser doesn't natively support this file's
+						<span class="font-mono">{reasons.join(' + ')}</span>.
+					{/if}
+				</p>
+				{#if playPlan.mode === 'transcode_full' || playPlan.mode === 'transcode_video'}
 					<p class="mt-2">
 						First few seconds may take a moment as ffmpeg spins up. Big seeks restart the
 						transcoder, so they pause briefly before resuming at the new spot.
 					</p>
-				</div>
-			{:else}
-				<div
-					class="mt-2 rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200"
-					role="status"
-				>
-					<p>Your browser has no HLS support, and this file's codecs aren't natively playable:</p>
-					<ul class="mt-1 ml-4 list-disc">
-						{#each compatIssues as issue (issue.kind)}
-							<li><span class="font-mono">{issueLabel(issue)}</span></li>
-						{/each}
-					</ul>
-				</div>
-			{/if}
+				{/if}
+			</div>
 		{/if}
 		{#if saveError}
 			<p class="mt-2 text-xs text-rose-500">{saveError}</p>

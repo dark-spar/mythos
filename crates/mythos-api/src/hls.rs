@@ -26,11 +26,12 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use mythos_auth::AuthUser;
+use mythos_core::PlaybackMode;
 use mythos_db::SubtitleRepo;
 use mythos_stream::{
-    SEGMENT_WAIT_TIMEOUT, SessionKey, TranscodeError, TranscodeManager, build_master_playlist,
-    build_variant_playlist, is_known_variant, parse_segment_filename, rendition_by_name,
-    wait_for_file,
+    ABR_LADDER, Rendition, SEGMENT_WAIT_TIMEOUT, SOURCE_VARIANT, SessionKey, TranscodeError,
+    TranscodeManager, build_master_playlist, build_variant_playlist, is_known_variant,
+    parse_segment_filename, rendition_by_name, source_rendition, wait_for_file,
 };
 use serde::Deserialize;
 use sqlx::SqlitePool;
@@ -48,6 +49,22 @@ pub struct HlsQuery {
     /// WebVTT sidecars and don't affect the transcode.
     #[serde(default)]
     pub sub: Option<Uuid>,
+    /// Playback mode this stream serves. Driven by the `/play`
+    /// endpoint; defaults to `transcode_full` so existing clients
+    /// that don't yet send `?mode=` still get the full-ABR pipeline.
+    #[serde(default)]
+    pub mode: Option<PlaybackMode>,
+    /// Comma-separated rendition names (`"480p,720p"`) for ABR modes.
+    /// Ignored for copy modes (which always emit a single source
+    /// rendition). Defaults to the full ABR ladder when missing.
+    #[serde(default)]
+    pub v: Option<String>,
+}
+
+impl HlsQuery {
+    fn mode_or_default(&self) -> PlaybackMode {
+        self.mode.unwrap_or(PlaybackMode::TranscodeFull)
+    }
 }
 
 pub async fn stop(
@@ -72,11 +89,19 @@ pub async fn master(
     Path(movie_id): Path<Uuid>,
     Query(q): Query<HlsQuery>,
 ) -> ApiResult<Response> {
+    let mode = q.mode_or_default();
+    if mode == PlaybackMode::DirectPlay {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "direct_play_has_no_master",
+        ));
+    }
     // Validate the movie exists and has a known duration so we don't
     // hand the player a master that points at variants we can't serve.
     movie_duration_seconds(&pool, movie_id).await?;
-    let query = playlist_query_for_sub(&pool, movie_id, q.sub).await?;
-    let body = build_master_playlist(&query);
+    let renditions = resolve_renditions(&pool, movie_id, mode, q.v.as_deref()).await?;
+    let query = build_query_string(&pool, movie_id, &q).await?;
+    let body = build_master_playlist(&renditions, &query);
     Ok(playlist_response(body))
 }
 
@@ -92,13 +117,17 @@ pub async fn variant_file(
     if !is_known_variant(&variant) {
         return Err(ApiError::new(StatusCode::NOT_FOUND, "unknown_variant"));
     }
+    let mode = q.mode_or_default();
+    let renditions = resolve_renditions(&pool, movie_id, mode, q.v.as_deref()).await?;
+    let rendition = *renditions
+        .iter()
+        .find(|r| r.name == variant)
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "unknown_variant"))?;
 
     if filename == "playlist.m3u8" {
         let duration = movie_duration_seconds(&pool, movie_id).await?;
-        let rendition = rendition_by_name(&variant)
-            .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "unknown_variant"))?;
-        let query = playlist_query_for_sub(&pool, movie_id, q.sub).await?;
-        let body = build_variant_playlist(duration, rendition, &query);
+        let query = build_query_string(&pool, movie_id, &q).await?;
+        let body = build_variant_playlist(duration, &rendition, &query);
         return Ok(playlist_response(body));
     }
 
@@ -118,7 +147,15 @@ pub async fn variant_file(
     };
 
     let session = manager
-        .ensure_session_for_segment(key, &abs_path, &variant, seg_idx, burn_in_sub)
+        .ensure_session_for_segment(
+            key,
+            &abs_path,
+            &variant,
+            seg_idx,
+            burn_in_sub,
+            mode,
+            &renditions,
+        )
         .await
         .map_err(map_transcode_error)?;
 
@@ -136,27 +173,119 @@ pub async fn variant_file(
     serve_bytes(&segment_path, "video/mp2t").await
 }
 
-/// Build the query-string suffix appended to URLs in the synthetic
-/// playlists. Empty when no sub is selected; `"?sub=<uuid>"` when an
-/// image sub is selected; empty when a text sub is selected (text
-/// subs go via WebVTT sidecar, not burn-in).
+/// Compute the rendition list for the given mode + optional `v=` hint.
 ///
-/// Returns a 404 if the sub_id doesn't exist or doesn't belong to
-/// the movie.
-async fn playlist_query_for_sub(
+/// - Copy modes (Remux, TranscodeAudio) always emit a single
+///   source-resolution rendition. We need media_files to know the
+///   source width/height/duration/size for the bandwidth hint.
+/// - ABR modes emit a subset of [`ABR_LADDER`] selected by the
+///   comma-separated `v=` names; missing or empty `v` means the full
+///   ladder.
+async fn resolve_renditions(
     pool: &SqlitePool,
     movie_id: Uuid,
-    sub: Option<Uuid>,
-) -> ApiResult<String> {
-    let Some(sub_id) = sub else {
-        return Ok(String::new());
-    };
-    let track = lookup_sub_for_movie(pool, movie_id, sub_id).await?;
-    if track.is_image {
-        Ok(format!("?sub={sub_id}"))
-    } else {
-        Ok(String::new())
+    mode: PlaybackMode,
+    v: Option<&str>,
+) -> ApiResult<Vec<Rendition>> {
+    if matches!(mode, PlaybackMode::Remux | PlaybackMode::TranscodeAudio) {
+        let info = source_dimensions(pool, movie_id).await?;
+        return Ok(vec![source_rendition(
+            info.width,
+            info.height,
+            info.size_bytes,
+            info.duration_seconds,
+        )]);
     }
+    // ABR modes (TranscodeVideo, TranscodeFull).
+    let names: Vec<String> = match v {
+        Some(s) if !s.trim().is_empty() => s
+            .split(',')
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .collect(),
+        _ => ABR_LADDER.iter().map(|r| r.name.to_string()).collect(),
+    };
+    let mut chosen: Vec<Rendition> = Vec::with_capacity(names.len());
+    for name in &names {
+        if name == SOURCE_VARIANT {
+            // Reject mixing source with ABR — it would advertise a
+            // pass-through tier in a master that's wired for re-encode.
+            return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid_renditions"));
+        }
+        let r = rendition_by_name(name)
+            .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "unknown_rendition"))?;
+        chosen.push(*r);
+    }
+    if chosen.is_empty() {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "no_renditions"));
+    }
+    Ok(chosen)
+}
+
+#[derive(Debug)]
+struct SourceInfo {
+    width: u32,
+    height: u32,
+    duration_seconds: f64,
+    size_bytes: u64,
+}
+
+async fn source_dimensions(pool: &SqlitePool, movie_id: Uuid) -> ApiResult<SourceInfo> {
+    type Row = (Option<i64>, Option<i64>, Option<f64>, i64);
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT mf.width, mf.height, mf.duration_seconds, mf.size_bytes \
+         FROM movies m JOIN media_files mf ON mf.id = m.file_id \
+         WHERE m.id = ?",
+    )
+    .bind(movie_id.to_string())
+    .fetch_optional(pool)
+    .await
+    .map_err(|err| {
+        tracing::error!(?err, "source_dimensions lookup failed");
+        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal")
+    })?;
+    let (w, h, dur, size) = row.ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "not_found"))?;
+    let width = w.and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
+    let height = h.and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
+    if width == 0 || height == 0 {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unknown_dimensions",
+        ));
+    }
+    let duration_seconds = dur.unwrap_or(0.0).max(0.0);
+    let size_bytes = u64::try_from(size).unwrap_or(0);
+    Ok(SourceInfo {
+        width,
+        height,
+        duration_seconds,
+        size_bytes,
+    })
+}
+
+/// Build the query-string suffix to append to URLs inside the
+/// synthetic playlists, combining `?mode=...`, `?sub=...`, and
+/// `?v=...` from the original request so they propagate through
+/// hls.js relative URL resolution.
+async fn build_query_string(pool: &SqlitePool, movie_id: Uuid, q: &HlsQuery) -> ApiResult<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(mode) = q.mode {
+        parts.push(format!("mode={}", mode.as_str()));
+    }
+    if let Some(v) = q.v.as_deref().filter(|s| !s.trim().is_empty()) {
+        parts.push(format!("v={v}"));
+    }
+    if let Some(sub_id) = q.sub {
+        let track = lookup_sub_for_movie(pool, movie_id, sub_id).await?;
+        if track.is_image {
+            parts.push(format!("sub={sub_id}"));
+        }
+    }
+    Ok(if parts.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", parts.join("&"))
+    })
 }
 
 /// Translate the `?sub=<uuid>` query into the absolute ffprobe stream

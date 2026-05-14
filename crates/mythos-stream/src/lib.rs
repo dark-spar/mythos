@@ -9,7 +9,10 @@ pub mod abr;
 pub mod hwaccel;
 pub mod transcode;
 
-pub use abr::{ABR_LADDER, Rendition, default_variant, is_known_variant, rendition_by_name};
+pub use abr::{
+    ABR_LADDER, Rendition, SOURCE_VARIANT, default_variant, is_known_variant, rendition_by_name,
+    source_rendition,
+};
 pub use hwaccel::{HwAccel, resolve as resolve_hwaccel};
 pub use transcode::{
     SEGMENT_DURATION_SECS, SEGMENT_WAIT_TIMEOUT, SessionKey, TranscodeError, TranscodeManager,

@@ -713,3 +713,20 @@
 		</section>
 	{/if}
 </main>
+
+<style>
+	/*
+	 * Browsers default to white-on-black-box for ::cue. Strip the
+	 * box and replace contrast with a soft text-shadow so cues read
+	 * as floating white text on top of the frame without the
+	 * letterbox-looking backdrop.
+	 */
+	:global(video::cue) {
+		background: transparent;
+		background-color: rgba(0, 0, 0, 0);
+		color: white;
+		text-shadow:
+			0 0 4px rgba(0, 0, 0, 0.9),
+			0 1px 2px rgba(0, 0, 0, 0.95);
+	}
+</style>

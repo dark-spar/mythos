@@ -548,29 +548,37 @@
 	<title>{detail?.movie.title ?? 'Movie'} — Mythos</title>
 </svelte:head>
 
-<main class="mx-auto max-w-5xl px-6 py-12">
-	{#if detail}
-		<a
-			href={resolve(`/library/${detail.movie.library_id}`)}
-			class="text-sm text-zinc-500 underline-offset-2 hover:text-zinc-900 hover:underline dark:hover:text-zinc-100"
-		>
-			← Back to library
-		</a>
-	{:else}
-		<a
-			href={resolve('/')}
-			class="text-sm text-zinc-500 underline-offset-2 hover:text-zinc-900 hover:underline dark:hover:text-zinc-100"
-		>
-			← Home
-		</a>
-	{/if}
+<main class="pb-12">
+	<div class="mx-auto max-w-5xl px-6 pt-12">
+		{#if detail}
+			<a
+				href={resolve(`/library/${detail.movie.library_id}`)}
+				class="text-sm text-zinc-500 underline-offset-2 hover:text-zinc-900 hover:underline dark:hover:text-zinc-100"
+			>
+				← Back to library
+			</a>
+		{:else}
+			<a
+				href={resolve('/')}
+				class="text-sm text-zinc-500 underline-offset-2 hover:text-zinc-900 hover:underline dark:hover:text-zinc-100"
+			>
+				← Home
+			</a>
+		{/if}
+	</div>
 
 	{#if loading}
-		<p class="mt-8 text-zinc-400">Loading…</p>
+		<p class="mx-auto mt-8 max-w-5xl px-6 text-zinc-400">Loading…</p>
 	{:else if error}
-		<p class="mt-8 font-mono text-rose-500">{error}</p>
+		<p class="mx-auto mt-8 max-w-5xl px-6 font-mono text-rose-500">{error}</p>
 	{:else if detail}
-		<section class="mt-4 overflow-hidden rounded-lg bg-black">
+		<!--
+			The player breaks out of the narrow content column. `w-full`
+			fills the viewport; `max-h-[85vh]` keeps the frame on-screen
+			at typical desktop aspect ratios without scrolling. `mx-auto`
+			centers when the viewport is wider than 85vh × 16/9.
+		-->
+		<section class="mt-4 overflow-hidden bg-black">
 			<!--
 				Text subtitle tracks render here via <track>. Image subs
 				(PGS/VOBSUB) are burned into the transcode by the server
@@ -581,7 +589,7 @@
 				bind:this={videoEl}
 				controls
 				preload="metadata"
-				class="aspect-video w-full"
+				class="mx-auto aspect-video max-h-[85vh] w-full"
 				onloadedmetadata={handleLoadedMetadata}
 				ontimeupdate={handleTimeUpdate}
 				onpause={handlePause}
@@ -601,116 +609,118 @@
 				Your browser can't play this file directly.
 			</video>
 		</section>
-		{#if detail.subtitles.length > 0}
-			<div class="mt-3 flex items-center gap-2 text-sm">
-				<label for="subtitle-select" class="text-zinc-500">Subtitles</label>
-				<select
-					id="subtitle-select"
-					bind:value={selectedSubId}
-					class="rounded border border-zinc-300 bg-white px-2 py-1 text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
-				>
-					<option value={null}>Off</option>
-					{#each detail.subtitles as sub (sub.id)}
-						<option value={sub.id}>{subtitleLabel(sub)}</option>
-					{/each}
-				</select>
-				{#if selectedSub?.is_image}
-					<span class="text-xs text-zinc-500">— burning into stream</span>
-				{/if}
-			</div>
-		{/if}
-		{#if playPlan && playPlan.mode !== 'direct_play'}
-			<div
-				class="mt-2 rounded border border-sky-300 bg-sky-50 p-3 text-xs text-sky-900 dark:border-sky-700 dark:bg-sky-950 dark:text-sky-200"
-				role="status"
-			>
-				<p>
-					<span class="font-medium">{modeLabel(playPlan.mode)}</span>
-					{#if reasons.length > 0}
-						— your browser doesn't natively support this file's
-						<span class="font-mono">{reasons.join(' + ')}</span>.
+		<div class="mx-auto max-w-5xl px-6">
+			{#if detail.subtitles.length > 0}
+				<div class="mt-3 flex items-center gap-2 text-sm">
+					<label for="subtitle-select" class="text-zinc-500">Subtitles</label>
+					<select
+						id="subtitle-select"
+						bind:value={selectedSubId}
+						class="rounded border border-zinc-300 bg-white px-2 py-1 text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+					>
+						<option value={null}>Off</option>
+						{#each detail.subtitles as sub (sub.id)}
+							<option value={sub.id}>{subtitleLabel(sub)}</option>
+						{/each}
+					</select>
+					{#if selectedSub?.is_image}
+						<span class="text-xs text-zinc-500">— burning into stream</span>
 					{/if}
-				</p>
-				{#if playPlan.mode === 'transcode_full' || playPlan.mode === 'transcode_video'}
-					<p class="mt-2">
-						First few seconds may take a moment as ffmpeg spins up. Big seeks restart the
-						transcoder, so they pause briefly before resuming at the new spot.
-					</p>
-				{/if}
-			</div>
-		{/if}
-		{#if saveError}
-			<p class="mt-2 text-xs text-rose-500">{saveError}</p>
-		{:else if initialPosition != null}
-			<p class="mt-2 text-xs text-zinc-500">
-				Resuming from {formatDuration(initialPosition)}. Press
-				<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">f</kbd> for
-				fullscreen,
-				<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">space</kbd> to play/pause.
-			</p>
-		{:else}
-			<p class="mt-2 text-xs text-zinc-500">
-				<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">f</kbd> fullscreen ·
-				<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">space</kbd> play/pause
-				·
-				<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">m</kbd> mute ·
-				<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">←/→</kbd> seek 10s
-			</p>
-		{/if}
-
-		<div class="mt-8 flex flex-col gap-6 sm:flex-row sm:items-start">
-			{#if detail.movie.poster_url}
-				<img
-					src={detail.movie.poster_url}
-					alt="{detail.movie.title} poster"
-					class="w-32 shrink-0 rounded shadow-sm sm:w-40"
-				/>
+				</div>
 			{/if}
-			<div class="min-w-0">
-				<h1 class="text-3xl font-semibold tracking-tight">{detail.movie.title}</h1>
-				{#if detail.movie.year != null}
-					<p class="mt-1 text-zinc-500">{detail.movie.year}</p>
-				{/if}
+			{#if playPlan && playPlan.mode !== 'direct_play'}
+				<div
+					class="mt-2 rounded border border-sky-300 bg-sky-50 p-3 text-xs text-sky-900 dark:border-sky-700 dark:bg-sky-950 dark:text-sky-200"
+					role="status"
+				>
+					<p>
+						<span class="font-medium">{modeLabel(playPlan.mode)}</span>
+						{#if reasons.length > 0}
+							— your browser doesn't natively support this file's
+							<span class="font-mono">{reasons.join(' + ')}</span>.
+						{/if}
+					</p>
+					{#if playPlan.mode === 'transcode_full' || playPlan.mode === 'transcode_video'}
+						<p class="mt-2">
+							First few seconds may take a moment as ffmpeg spins up. Big seeks restart the
+							transcoder, so they pause briefly before resuming at the new spot.
+						</p>
+					{/if}
+				</div>
+			{/if}
+			{#if saveError}
+				<p class="mt-2 text-xs text-rose-500">{saveError}</p>
+			{:else if initialPosition != null}
+				<p class="mt-2 text-xs text-zinc-500">
+					Resuming from {formatDuration(initialPosition)}. Press
+					<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">f</kbd> for
+					fullscreen,
+					<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">space</kbd> to play/pause.
+				</p>
+			{:else}
+				<p class="mt-2 text-xs text-zinc-500">
+					<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">f</kbd> fullscreen ·
+					<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">space</kbd>
+					play/pause ·
+					<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">m</kbd> mute ·
+					<kbd class="rounded border border-zinc-300 px-1 dark:border-zinc-700">←/→</kbd> seek 10s
+				</p>
+			{/if}
 
-				{#if detail.movie.overview}
-					<p class="mt-4 leading-relaxed text-zinc-700 dark:text-zinc-300">
-						{detail.movie.overview}
-					</p>
-				{:else}
-					<p class="mt-4 text-sm text-zinc-400 italic">
-						No description on file. Configure a TMDb API key and rescan to enrich.
-					</p>
+			<div class="mt-8 flex flex-col gap-6 sm:flex-row sm:items-start">
+				{#if detail.movie.poster_url}
+					<img
+						src={detail.movie.poster_url}
+						alt="{detail.movie.title} poster"
+						class="w-32 shrink-0 rounded shadow-sm sm:w-40"
+					/>
 				{/if}
+				<div class="min-w-0">
+					<h1 class="text-3xl font-semibold tracking-tight">{detail.movie.title}</h1>
+					{#if detail.movie.year != null}
+						<p class="mt-1 text-zinc-500">{detail.movie.year}</p>
+					{/if}
+
+					{#if detail.movie.overview}
+						<p class="mt-4 leading-relaxed text-zinc-700 dark:text-zinc-300">
+							{detail.movie.overview}
+						</p>
+					{:else}
+						<p class="mt-4 text-sm text-zinc-400 italic">
+							No description on file. Configure a TMDb API key and rescan to enrich.
+						</p>
+					{/if}
+				</div>
 			</div>
+
+			<section class="mt-10 rounded-lg border border-zinc-200 p-5 dark:border-zinc-800">
+				<h2 class="text-sm font-medium tracking-wide text-zinc-500 uppercase">File</h2>
+				<dl class="mt-4 grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 text-sm">
+					<dt class="text-zinc-500">Path</dt>
+					<dd class="font-mono break-all text-zinc-900 dark:text-zinc-100">{detail.file.path}</dd>
+
+					<dt class="text-zinc-500">Container</dt>
+					<dd class="text-zinc-900 dark:text-zinc-100">{detail.file.container ?? '—'}</dd>
+
+					<dt class="text-zinc-500">Video</dt>
+					<dd class="text-zinc-900 dark:text-zinc-100">{detail.file.video_codec ?? '—'}</dd>
+
+					<dt class="text-zinc-500">Audio</dt>
+					<dd class="text-zinc-900 dark:text-zinc-100">{detail.file.audio_codec ?? '—'}</dd>
+
+					<dt class="text-zinc-500">Resolution</dt>
+					<dd class="text-zinc-900 dark:text-zinc-100">{formatResolution(detail.file) ?? '—'}</dd>
+
+					<dt class="text-zinc-500">Duration</dt>
+					<dd class="text-zinc-900 dark:text-zinc-100">
+						{formatDuration(detail.file.duration_seconds)}
+					</dd>
+
+					<dt class="text-zinc-500">Size</dt>
+					<dd class="text-zinc-900 dark:text-zinc-100">{formatBytes(detail.file.size_bytes)}</dd>
+				</dl>
+			</section>
 		</div>
-
-		<section class="mt-10 rounded-lg border border-zinc-200 p-5 dark:border-zinc-800">
-			<h2 class="text-sm font-medium tracking-wide text-zinc-500 uppercase">File</h2>
-			<dl class="mt-4 grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 text-sm">
-				<dt class="text-zinc-500">Path</dt>
-				<dd class="font-mono break-all text-zinc-900 dark:text-zinc-100">{detail.file.path}</dd>
-
-				<dt class="text-zinc-500">Container</dt>
-				<dd class="text-zinc-900 dark:text-zinc-100">{detail.file.container ?? '—'}</dd>
-
-				<dt class="text-zinc-500">Video</dt>
-				<dd class="text-zinc-900 dark:text-zinc-100">{detail.file.video_codec ?? '—'}</dd>
-
-				<dt class="text-zinc-500">Audio</dt>
-				<dd class="text-zinc-900 dark:text-zinc-100">{detail.file.audio_codec ?? '—'}</dd>
-
-				<dt class="text-zinc-500">Resolution</dt>
-				<dd class="text-zinc-900 dark:text-zinc-100">{formatResolution(detail.file) ?? '—'}</dd>
-
-				<dt class="text-zinc-500">Duration</dt>
-				<dd class="text-zinc-900 dark:text-zinc-100">
-					{formatDuration(detail.file.duration_seconds)}
-				</dd>
-
-				<dt class="text-zinc-500">Size</dt>
-				<dd class="text-zinc-900 dark:text-zinc-100">{formatBytes(detail.file.size_bytes)}</dd>
-			</dl>
-		</section>
 	{/if}
 </main>
 

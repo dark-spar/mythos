@@ -26,11 +26,12 @@ crates/
   mythos-server   binary; axum app, embeds the SPA, wires everything together
   mythos-core     domain types shared across crates (MediaItem, MediaKind, ...)
   mythos-db       SQLite pool + migrate runner. Re-exports SqlitePool.
+  mythos-auth     argon2 password hashing, JWT issuance, AuthUser/AdminUser extractors
   mythos-api      axum routers/handlers
-  mythos-scan     filesystem walker + identifier (Phase 1)
-  mythos-meta     TMDb / MusicBrainz / OpenLibrary clients (Phase 1)
-  mythos-stream   direct-play + HLS pipeline (Phase 2 / 4)
-migrations/       SQL files run by sqlx::migrate!
+  mythos-scan     filesystem walker (jwalk) + ffprobe identifier
+  mythos-meta     TMDb client w/ on-disk poster cache (MusicBrainz/OpenLibrary later)
+  mythos-stream   FFmpeg HLS transcoder, ABR ladder, hwaccel probe, subtitle burn-in
+migrations/       SQL files run by sqlx::migrate! (0001–0007 so far)
 web/              SvelteKit 2 + Svelte 5 + TS + Tailwind v4 + Vidstack + hls.js
 ```
 
@@ -90,20 +91,21 @@ Track which phase we're in; don't pull work forward without a reason.
 
 - **Phase 0 — foundation (done).** Workspace, embedded SPA, axum boot,
   SQLite + migrations, `/api/health`, CI.
-- **Phase 1 — library scan + browse + auth.** Schema for movies / episodes /
-  series / tracks / albums / artists / photos / books / media_files /
-  watch_progress. `mythos-scan` walker driven by jwalk + ffprobe. `mythos-meta`
-  TMDb client with on-disk cache. argon2 + JWT auth. UI: login, library list,
-  grid view, item detail.
-- **Phase 2 — direct-play streaming.** `GET /api/items/:id/stream` with byte-range
-  support, Vidstack source binding, debounced watch progress, resume.
-- **Phase 3 — TV, music, photos, books.** Series hierarchy, music tags via
-  `lofty` + MusicBrainz, photo thumbnails + EXIF, EPUB metadata + `epub.js`.
-- **Phase 4 — HLS transcoding.** FFmpeg subprocess manager, segmented HLS,
-  seek-by-restart, external subtitles.
-- **Phase 5 — profiles + ABR + hwaccel.** Device profile resolver, multi-rendition
-  HLS, NVENC / QSV / VAAPI / VideoToolbox detection, subtitle burn-in for image
-  subs.
+- **Phase 1 — library scan + browse + auth (done, movies-only slice).**
+  argon2 + JWT auth, libraries CRUD, `mythos-scan` walker (jwalk + ffprobe),
+  `mythos-meta` TMDb client with on-disk poster cache + admin-editable API key
+  (env var wins; UI value swaps live via `TmdbHandle`). UI: login, libraries
+  admin, movie grid, movie detail. Schema for episodes/series/tracks/albums/
+  artists/photos/books is **not yet built** — comes in Phase 3.
+- **Phase 2 — direct-play streaming (done).** `GET /api/movies/:id/stream`
+  byte-range, Vidstack binding, debounced watch progress, resume.
+- **Phase 3 — TV, music, photos, books (NEXT).** Series hierarchy, music tags
+  via `lofty` + MusicBrainz, photo thumbnails + EXIF, EPUB metadata + `epub.js`.
+- **Phase 4 — HLS transcoding (done).** FFmpeg subprocess manager,
+  segmented HLS, seek-by-restart.
+- **Phase 5 — profiles + ABR + hwaccel (done through 5d).** Hardware probe
+  (NVENC / QSV / VAAPI / VideoToolbox), multi-rendition ABR ladder, subtitle
+  burn-in + WebVTT sidecar, client-declared profile + transcode taxonomy.
 - **Phase 6 — Jellyfin compatibility shim.** Translation layer at `/jellyfin/*`
   for Findroid / Swiftfin / jellyfin-web.
 
@@ -121,3 +123,14 @@ The full plan with rationale and verification steps lives at
   workspace root — `crates/mythos-server` uses `../../web/build`. Don't break that.
 - **CI runs the web build separately** from the Rust build (artifact handoff)
   so set `MYTHOS_SKIP_WEB_BUILD=1` for any cargo invocation in CI.
+- **TMDb API key has two sources.** `MYTHOS_TMDB_API_KEY` env var wins over the
+  `settings` table value (set via the admin UI). Resolution lives in
+  `mythos_api::resolve_tmdb_api_key`; the live `TmdbHandle` is swapped by the
+  settings PUT handler so a new key takes effect on the next scan without a
+  restart. Don't reintroduce a config-only path.
+- **`mythos-auth` errors don't implement `IntoResponse`.** Translation to HTTP
+  lives in `mythos-api` so the auth crate stays usable from non-HTTP contexts
+  (CLI, tests, future Jellyfin shim). Keep that boundary.
+- **HLS sessions are torn down on player teardown** (`DELETE /api/movies/:id/hls`).
+  Don't leak ffmpeg subprocesses — route any new transcode entry point through
+  `TranscodeManager` so the lifecycle stays centralized.

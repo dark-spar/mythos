@@ -2,13 +2,14 @@
 
 A self-hosted media server, written in Rust. Movies, TV, music, photos, books — one binary, your library, your hardware.
 
-> Status: **early development.** Phase 0 (foundation) is in place: workspace, embedded SvelteKit UI, SQLite + migrations, axum server. Library scanning, metadata, and streaming arrive in subsequent phases.
+> Status: **early development, movies-only.** Auth, library CRUD, filesystem scanning, TMDb enrichment, direct-play streaming, watch progress/resume, FFmpeg HLS transcoding, multi-rendition ABR, hardware acceleration, and subtitle burn-in are all working. TV/music/photos/books and a Jellyfin compatibility shim are next.
 
 ## Architecture at a glance
 
 - **Server**: Rust workspace, async via Tokio, HTTP via [axum](https://github.com/tokio-rs/axum), persistence via [SQLx](https://github.com/launchbadge/sqlx) + SQLite.
 - **Web UI**: SvelteKit 2 + Svelte 5 + Tailwind v4, embedded into the server binary via [`rust-embed`](https://github.com/pyrossh/rust-embed) at build time. Media playback uses [Vidstack](https://www.vidstack.io/) and [hls.js](https://github.com/video-dev/hls.js).
-- **Streaming** (planned): direct play first, FFmpeg HLS transcoding next, then device profiles, ABR, and hardware acceleration.
+- **Streaming**: HTTP byte-range direct play for browser-compatible files, FFmpeg HLS transcoding for everything else, multi-rendition ABR ladder, hardware acceleration (NVENC / QSV / VAAPI / VideoToolbox), subtitle burn-in for image subs.
+- **Auth**: argon2id password hashing, HS256 JWTs delivered via `SameSite=Lax` HttpOnly cookie (or `Authorization: Bearer` for API clients).
 - **Compatibility shim** (later phase): a Jellyfin-API-compatible router so existing clients (Findroid, Swiftfin, jellyfin-web) work against Mythos.
 
 ## Workspace layout
@@ -18,9 +19,10 @@ crates/
   mythos-server   — main binary, axum app, embedded SPA fallback
   mythos-core     — shared domain types
   mythos-db       — SQLite pool + migrations
-  mythos-scan     — filesystem scanner (Phase 1)
-  mythos-meta     — TMDb / MusicBrainz / OpenLibrary clients (Phase 1)
-  mythos-stream   — direct-play + HLS pipeline (Phase 2/4)
+  mythos-auth     — argon2 + JWT, AuthUser/AdminUser extractors
+  mythos-scan     — filesystem scanner (jwalk + ffprobe)
+  mythos-meta     — TMDb client (MusicBrainz / OpenLibrary later)
+  mythos-stream   — FFmpeg HLS transcoder, ABR, hwaccel, subtitle burn-in
   mythos-api      — HTTP handlers
 migrations/       — SQL files run by sqlx::migrate!
 web/              — SvelteKit project; pnpm build → web/build/ → embedded
@@ -72,13 +74,13 @@ log_filter = "info,mythos=debug,sqlx=warn"
 
 ## Roadmap
 
-Phase 0 — foundation (done)
-Phase 1 — library scan + browse + auth
-Phase 2 — direct-play streaming
-Phase 3 — TV, music, photos, books
-Phase 4 — HLS transcoding
-Phase 5 — device profiles + ABR + hardware acceleration
-Phase 6 — Jellyfin-API compatibility shim
+- Phase 0 — foundation ✅
+- Phase 1 — library scan + browse + auth ✅ *(movies-only slice)*
+- Phase 2 — direct-play streaming ✅
+- Phase 3 — TV, music, photos, books ⏳ *next*
+- Phase 4 — HLS transcoding ✅
+- Phase 5 — device profiles + ABR + hardware acceleration ✅ *(through 5d)*
+- Phase 6 — Jellyfin-API compatibility shim
 
 ## License
 

@@ -38,11 +38,32 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         if self.status.is_server_error() {
-            tracing::error!(code = self.code, source = ?self.source, "api server error");
+            if is_expected_backpressure(self.code) {
+                // Controlled "client should retry shortly" responses
+                // (transcode session still booting, transcoding
+                // disabled at the deployment) come back as 5xx because
+                // that's the right HTTP signal for retry-the-request,
+                // but they aren't faults — log at debug so they don't
+                // poison the operator's view of real failures.
+                tracing::debug!(
+                    code = self.code,
+                    status = %self.status,
+                    "controlled backpressure response"
+                );
+            } else {
+                tracing::error!(code = self.code, source = ?self.source, "api server error");
+            }
         }
         let body = Json(json!({ "error": self.code }));
         (self.status, body).into_response()
     }
+}
+
+/// Codes that surface as 5xx but mean "retry, this is normal" rather
+/// than "something is broken." Used to keep the operator log honest:
+/// real ERROR lines are real problems.
+fn is_expected_backpressure(code: &str) -> bool {
+    matches!(code, "session_booting" | "transcoding_disabled")
 }
 
 impl From<mythos_db::DbError> for ApiError {

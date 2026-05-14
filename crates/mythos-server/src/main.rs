@@ -9,8 +9,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::signal;
+use tower_http::classify::ServerErrorsFailureClass;
 use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
+use tracing::Span;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -149,7 +151,24 @@ fn build_app(
         .merge(api)
         .fallback(web::handler)
         .layer(CompressionLayer::new())
-        .layer(TraceLayer::new_for_http())
+        // tower_http's default classifier treats every 5xx as a
+        // failure and logs at ERROR. That conflates real faults with
+        // controlled backpressure like our 503 "session still
+        // booting" — override the on_failure callback so 503 stays
+        // quiet at the trace layer (the handler-level log will say
+        // what's going on at DEBUG if you want it).
+        .layer(
+            TraceLayer::new_for_http().on_failure(
+                |class: ServerErrorsFailureClass, _latency: std::time::Duration, _span: &Span| {
+                    if let ServerErrorsFailureClass::StatusCode(status) = class
+                        && status.as_u16() == 503
+                    {
+                        return;
+                    }
+                    tracing::error!(classification = ?class, "response failed");
+                },
+            ),
+        )
 }
 
 fn init_tracing(filter: &str) {

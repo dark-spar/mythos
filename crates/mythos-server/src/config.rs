@@ -35,7 +35,7 @@ fn default_token_ttl_days() -> u64 {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            listen: "127.0.0.1:8080".parse().unwrap(),
+            listen: "0.0.0.0:8080".parse().unwrap(),
             data_dir: PathBuf::from("./data"),
             log_filter: "info,mythos=debug,sqlx=warn".to_string(),
             cookie_secure: default_cookie_secure(),

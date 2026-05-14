@@ -33,6 +33,20 @@
 	/// movie. The diagnostic banner and the "what's actually
 	/// happening" subtitle hint read from here.
 	let playPlan = $state<PlayResponse | null>(null);
+	/// Object URL for the currently-selected text subtitle's WebVTT
+	/// blob. We prefetch the file rather than letting the `<track>`
+	/// element load via its `src` attribute, because browsers
+	/// inconsistently honor `<track>` src loading when the parent
+	/// `<video>` doesn't yet have a media source (the common case on
+	/// hard-refresh with a remembered sub). Blob URLs are local and
+	/// always load instantly.
+	let trackBlobUrl = $state<string | null>(null);
+	/// Goes true once the `<video>` has loaded its media metadata.
+	/// We gate the `<track>` mount on this so the element only
+	/// appears after hls.js's `attachMedia` has finished setting
+	/// `video.src` — adding a track during that transition is what
+	/// kept the browser from picking it up on fresh page load.
+	let videoReady = $state(false);
 
 	/// User's subtitle selection. `null` = off. The actual track is
 	/// looked up in `detail.subtitles` so storage just holds the id.
@@ -378,6 +392,23 @@
 		}
 	}
 
+	/// Svelte action: when a `<track>` element is about to be
+	/// unmounted, set its mode to `disabled` so the browser clears
+	/// any currently-displayed cue. Without this, the last cue
+	/// stays on screen forever — removing the `<track>` from the
+	/// DOM doesn't repaint the captions area on its own.
+	function clearCuesOnDestroy(node: HTMLTrackElement) {
+		return {
+			destroy() {
+				try {
+					node.track.mode = 'disabled';
+				} catch {
+					// Video element already torn down — nothing to clear.
+				}
+			}
+		};
+	}
+
 	function loadSavedSub(movieId: string): string | null {
 		try {
 			return localStorage.getItem(`mythos:sub:${movieId}`) || null;
@@ -397,6 +428,106 @@
 
 	$effect(() => {
 		if (detail) saveSub(detail.movie.id, selectedSubId);
+	});
+
+	/// Prefetch the WebVTT for the active text sub into a blob URL.
+	/// Avoids the browser's `<track>` loading state machine entirely
+	/// — by the time the `<track>` element mounts, the cuelist is
+	/// already local and the browser only has to parse it.
+	$effect(() => {
+		const sub = textSub;
+		const movieId = detail?.movie.id;
+		if (!sub || !movieId) {
+			if (trackBlobUrl) URL.revokeObjectURL(trackBlobUrl);
+			trackBlobUrl = null;
+			return;
+		}
+		let cancelled = false;
+		let created: string | null = null;
+		fetch(`/api/movies/${movieId}/subtitles/${sub.id}/vtt`, {
+			credentials: 'same-origin'
+		})
+			.then((r) => {
+				if (!r.ok) throw new Error(`vtt ${r.status}`);
+				return r.blob();
+			})
+			.then((blob) => {
+				if (cancelled) return;
+				created = URL.createObjectURL(blob);
+				if (trackBlobUrl) URL.revokeObjectURL(trackBlobUrl);
+				trackBlobUrl = created;
+			})
+			.catch((err) => {
+				if (!cancelled) saveError = `Couldn't load subtitle: ${err.message}`;
+			});
+		return () => {
+			cancelled = true;
+			if (created) URL.revokeObjectURL(created);
+		};
+	});
+
+	$effect(() => {
+		const video = videoEl;
+		if (!video) return;
+		const onMetadata = () => {
+			videoReady = true;
+		};
+		const onEmptied = () => {
+			// Source change (e.g., switching from HLS to direct-play
+			// when the user toggles an image sub off). Wait for the
+			// next loadedmetadata before letting the <track> remount.
+			videoReady = false;
+		};
+		video.addEventListener('loadedmetadata', onMetadata);
+		video.addEventListener('emptied', onEmptied);
+		return () => {
+			video.removeEventListener('loadedmetadata', onMetadata);
+			video.removeEventListener('emptied', onEmptied);
+			videoReady = false;
+		};
+	});
+
+	/// Keep the active text-subtitle track in `showing` mode.
+	///
+	/// Two browser quirks make this less obvious than it should be:
+	///
+	/// 1. The `<track default>` attribute is only honored when the
+	///    `<video>` is parsed at page load. Tracks added dynamically
+	///    (which is what happens here — the element only appears
+	///    after the user picks a sub OR the saved choice is
+	///    restored from localStorage) come up in `disabled` mode
+	///    and never render cues, even after the VTT loads.
+	/// 2. When hls.js calls `attachMedia` later, the resulting
+	///    `video.src` change resets every existing text track to
+	///    `disabled`. So setting mode before attach gets undone.
+	///
+	/// Solution: listen for `addtrack` (new `<track>` mounted) and
+	/// `loadedmetadata` (video.src just changed) on the video
+	/// element, and force any subtitle track back to `showing`. Also
+	/// re-applies whenever `textSub` changes, since the effect
+	/// re-runs.
+	$effect(() => {
+		const video = videoEl;
+		if (!video) return;
+		// Touching textSub here makes the effect re-run on toggle,
+		// so the freshly remounted track gets switched on right
+		// after Svelte adds it to the DOM.
+		void textSub;
+		const apply = () => {
+			for (let i = 0; i < video.textTracks.length; i++) {
+				const t = video.textTracks[i];
+				if (t.kind === 'subtitles' && t.mode !== 'showing') {
+					t.mode = 'showing';
+				}
+			}
+		};
+		apply();
+		video.textTracks.addEventListener('addtrack', apply);
+		video.addEventListener('loadedmetadata', apply);
+		return () => {
+			video.textTracks.removeEventListener('addtrack', apply);
+			video.removeEventListener('loadedmetadata', apply);
+		};
 	});
 
 	const reasons = $derived(playPlan ? transcodeReasons(playPlan) : []);
@@ -455,14 +586,17 @@
 				ontimeupdate={handleTimeUpdate}
 				onpause={handlePause}
 			>
-				{#if textSub}
-					<track
-						kind="subtitles"
-						src="/api/movies/{detail.movie.id}/subtitles/{textSub.id}/vtt"
-						srclang={textSub.language ?? 'und'}
-						label={subtitleLabel(textSub)}
-						default
-					/>
+				{#if textSub && trackBlobUrl && videoReady}
+					{#key trackBlobUrl}
+						<track
+							use:clearCuesOnDestroy
+							kind="subtitles"
+							src={trackBlobUrl}
+							srclang={textSub.language ?? 'und'}
+							label={subtitleLabel(textSub)}
+							default
+						/>
+					{/key}
 				{/if}
 				Your browser can't play this file directly.
 			</video>

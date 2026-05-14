@@ -28,6 +28,30 @@
 	let lastSavedAt = 0;
 	let saveError = $state<string | null>(null);
 
+	/// Back-link overlay on the player. Shown on pointer movement
+	/// over the video, hidden after a short idle, hidden on pointer
+	/// leave. The timeout matches the empirical idle-window the
+	/// native `<video controls>` UI uses on Chrome and Firefox
+	/// (~2s) so the link fades out in sync with the playback
+	/// controls.
+	let backLinkVisible = $state(false);
+	let backLinkIdleTimer: ReturnType<typeof setTimeout> | null = null;
+	const BACK_LINK_IDLE_MS = 2000;
+	function showBackLinkAwhile() {
+		backLinkVisible = true;
+		if (backLinkIdleTimer) clearTimeout(backLinkIdleTimer);
+		backLinkIdleTimer = setTimeout(() => {
+			backLinkVisible = false;
+		}, BACK_LINK_IDLE_MS);
+	}
+	function hideBackLink() {
+		if (backLinkIdleTimer) {
+			clearTimeout(backLinkIdleTimer);
+			backLinkIdleTimer = null;
+		}
+		backLinkVisible = false;
+	}
+
 	let hls: Hls | null = null;
 	/// Latest server-side playback decision for the currently-loaded
 	/// movie. The diagnostic banner and the "what's actually
@@ -572,10 +596,24 @@
 	{:else if detail}
 		<!--
 			The player sits at the top of the page so playback starts
-			above the fold. The back link and metadata follow inside
-			the narrow content column.
+			above the fold. The back-to-library link overlays the
+			top-left corner of the video; it fades in on pointer
+			movement and back out after 3s of stillness.
 		-->
-		<section class="overflow-hidden bg-black">
+		<section
+			class="relative overflow-hidden bg-black"
+			aria-label="Video player"
+			onmousemove={showBackLinkAwhile}
+			onmouseleave={hideBackLink}
+		>
+			<a
+				href={resolve(`/library/${detail.movie.library_id}`)}
+				class="absolute top-4 left-4 z-10 rounded bg-black/60 px-3 py-1.5 text-sm text-zinc-100 backdrop-blur transition-opacity duration-200 hover:bg-black/80 {backLinkVisible
+					? 'opacity-100'
+					: 'pointer-events-none opacity-0'}"
+			>
+				← Back to library
+			</a>
 			<!--
 				Text subtitle tracks render here via <track>. Image subs
 				(PGS/VOBSUB) are burned into the transcode by the server
@@ -607,12 +645,6 @@
 			</video>
 		</section>
 		<div class="mx-auto max-w-5xl px-6 pt-6">
-			<a
-				href={resolve(`/library/${detail.movie.library_id}`)}
-				class="text-sm text-zinc-400 underline-offset-2 hover:text-zinc-100 hover:underline"
-			>
-				← Back to library
-			</a>
 			{#if detail.subtitles.length > 0}
 				<div class="mt-3 flex items-center gap-2 text-sm">
 					<label for="subtitle-select" class="text-zinc-400">Subtitles</label>

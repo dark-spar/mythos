@@ -33,6 +33,25 @@ use crate::error::{ApiError, ApiResult};
 #[derive(Clone, Default)]
 pub struct HlsHandle(pub Option<TranscodeManager>);
 
+/// Stop any in-flight transcode session for `(user, movie_id)`.
+/// Idempotent — calling it when no session exists is a no-op.
+/// The SPA fires this on player teardown so the server doesn't keep
+/// an orphaned ffmpeg running until the 5-minute idle reaper notices.
+pub async fn stop(
+    State(hls): State<HlsHandle>,
+    user: AuthUser,
+    Path(movie_id): Path<Uuid>,
+) -> Response {
+    if let Some(manager) = hls.0.as_ref() {
+        let key = SessionKey {
+            user_id: user.id,
+            movie_id,
+        };
+        manager.stop(&key).await;
+    }
+    (StatusCode::NO_CONTENT, ()).into_response()
+}
+
 pub async fn hls(
     State(pool): State<SqlitePool>,
     State(hls): State<HlsHandle>,

@@ -65,8 +65,11 @@
 	// changes — navigating between movies, etc.
 	$effect(() => {
 		if (!videoEl || !detail) return;
+		// Capture the id here so the cleanup closure can tell the server
+		// which session to stop even after `detail` has been reset.
+		const movieId = detail.movie.id;
 		attachPlayer(videoEl, detail);
-		return () => detachPlayer();
+		return () => detachPlayer(movieId);
 	});
 
 	function attachPlayer(el: HTMLVideoElement, d: MovieDetail) {
@@ -119,7 +122,7 @@
 		saveError = "Your browser has no HLS support — can't play this file.";
 	}
 
-	function detachPlayer() {
+	function detachPlayer(movieId?: string) {
 		if (hls) {
 			hls.destroy();
 			hls = null;
@@ -127,6 +130,22 @@
 		if (videoEl) {
 			videoEl.removeAttribute('src');
 			videoEl.load();
+		}
+		if (movieId) {
+			stopTranscodeSession(movieId);
+		}
+	}
+
+	function stopTranscodeSession(movieId: string) {
+		try {
+			// keepalive so the request survives page navigation / tab close.
+			void fetch(`/api/movies/${movieId}/hls`, {
+				method: 'DELETE',
+				credentials: 'same-origin',
+				keepalive: true
+			});
+		} catch {
+			// page going away — nothing actionable
 		}
 	}
 
@@ -201,6 +220,11 @@
 		if (pos != null && dur != null && pos >= 0 && dur > 0) {
 			sendProgressBeacon(detail.movie.id, pos, dur);
 		}
+		// Tear the server-side transcode session down as the tab closes.
+		// The $effect cleanup also fires for in-app navigation; this
+		// covers the full-tab-close case where Svelte doesn't get a
+		// chance to run unmount handlers.
+		stopTranscodeSession(detail.movie.id);
 	}
 
 	function toggleFullscreen() {

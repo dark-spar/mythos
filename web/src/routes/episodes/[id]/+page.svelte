@@ -11,13 +11,19 @@
 	let detail = $state<EpisodeDetail | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+	/// Latched per loadDetail call. The Player consumes it on mount;
+	/// after that point the value being stale is fine because the
+	/// Player only reads it once (in `tryAutoplay`).
+	let autoplayThisNav = $state(false);
 
-	async function loadDetail(episodeId: string) {
+	async function loadDetail(episodeId: string, shouldAutoplay: boolean) {
 		loading = true;
 		error = null;
 		detail = null;
+		autoplayThisNav = false;
 		try {
 			detail = await getEpisode(episodeId);
+			autoplayThisNav = shouldAutoplay;
 		} catch (e) {
 			error =
 				e instanceof ApiError
@@ -32,19 +38,24 @@
 		}
 	}
 
-	// `onMount` covers the initial mount (also fires when the layout's
-	// auth gate finally renders this page after a hard refresh).
-	// `afterNavigate` covers subsequent client-side navigations,
-	// including same-route ones like /episodes/A → /episodes/B where a
-	// $effect reading page.params.id did not re-trigger reliably. The
-	// `type === 'enter'` skip avoids double-fetching on initial mount.
+	// `onMount` covers the initial mount (and hard refresh after the
+	// layout's auth gate releases this page). `afterNavigate` covers
+	// subsequent client-side navs, including same-route ones where
+	// a $effect reading page.params.id wasn't re-firing reliably.
+	// `type === 'enter'` is skipped to avoid double-fetching on
+	// initial mount.
+	//
+	// The Player auto-starts playback only when arrived-at-via the
+	// up-next countdown (signalled through SvelteKit page state).
+	// Manual navigation (click a link, refresh, type the URL) leaves
+	// `page.state.autoplay` unset, so onMount passes false.
 	onMount(() => {
-		void loadDetail(page.params.id as string);
+		void loadDetail(page.params.id as string, false);
 	});
 
 	afterNavigate((nav) => {
 		if (nav.type === 'enter') return;
-		void loadDetail(page.params.id as string);
+		void loadDetail(page.params.id as string, page.state.autoplay === true);
 	});
 
 	function episodeLabel(seasonNumber: number, episodeNumber: number): string {
@@ -100,6 +111,7 @@
 			initialPositionSeconds={initialPosition}
 			backHref={`/series/${detail.series.id}`}
 			next={upNext}
+			autoplayOnMount={autoplayThisNav}
 		/>
 
 		<div class="mx-auto max-w-5xl px-6 pt-6">

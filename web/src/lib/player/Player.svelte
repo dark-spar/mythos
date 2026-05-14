@@ -33,6 +33,12 @@
 		/// toggle and countdown card are hidden when this is omitted
 		/// (e.g. on movie pages).
 		next?: { href: string; label: string };
+		/// When true, call `video.play()` once the stream attaches.
+		/// The episode page sets this when it arrived via the
+		/// auto-play countdown so consecutive episodes play seamlessly
+		/// without preserving the surprising "every player page
+		/// autoplays" default for manual navigation.
+		autoplayOnMount?: boolean;
 		/// Caller can react to the server-side playback decision once
 		/// it's resolved (e.g., render a diagnostic banner outside the
 		/// player). Optional.
@@ -47,6 +53,7 @@
 		initialPositionSeconds,
 		backHref,
 		next,
+		autoplayOnMount = false,
 		onPlanResolved
 	}: Props = $props();
 
@@ -145,8 +152,14 @@
 		// (`/episodes/{uuid}`), so SvelteKit's typed resolve() can't
 		// type-check it; navigating with the dynamic string is the
 		// intended behavior.
+		//
+		// Pass `state: { autoplay: true }` so the destination page
+		// can tell this navigation came from the countdown card and
+		// trigger playback automatically. Manual navigations leave
+		// state unset, so visiting a player page by link / refresh
+		// stays user-initiated.
 		// eslint-disable-next-line svelte/no-navigation-without-resolve
-		if (href) void goto(href);
+		if (href) void goto(href, { state: { autoplay: true } });
 	}
 
 	function handleEnded() {
@@ -201,11 +214,12 @@
 		const goingHls = plan.mode !== 'direct_play' || burnInSubId !== null;
 		if (!goingHls) {
 			el.src = url;
+			tryAutoplay(el);
 			return;
 		}
 
 		if (Hls.isSupported()) {
-			hls = new Hls({
+			const instance = new Hls({
 				enableWorker: true,
 				lowLatencyMode: false,
 				// Seeks restart ffmpeg, which takes 2-4s to produce the
@@ -223,17 +237,39 @@
 				nudgeMaxRetry: 0,
 				highBufferWatchdogPeriod: 30
 			});
-			hls.loadSource(url);
-			hls.attachMedia(el);
+			hls = instance;
+			// MANIFEST_PARSED fires once the master + initial variant
+			// are loaded; that's the right moment to start playback
+			// rather than racing the manifest fetch.
+			instance.once(Hls.Events.MANIFEST_PARSED, () => {
+				tryAutoplay(el);
+			});
+			instance.loadSource(url);
+			instance.attachMedia(el);
 			return;
 		}
 
 		if (el.canPlayType('application/vnd.apple.mpegurl')) {
 			el.src = url;
+			tryAutoplay(el);
 			return;
 		}
 
 		saveError = "Your browser has no HLS support — can't play this file.";
+	}
+
+	/// Attempt to start playback. Used when the caller signals that
+	/// this mount came from an auto-play countdown (e.g. consecutive
+	/// episode in a TV binge). The browser's autoplay policy may
+	/// still block — there's no recent user gesture on a brand-new
+	/// page load — so any rejection is swallowed silently and the
+	/// user can press play manually.
+	function tryAutoplay(el: HTMLVideoElement) {
+		if (!autoplayOnMount) return;
+		void el.play().catch(() => {
+			// Autoplay blocked by browser policy or interrupted by a
+			// fast unmount. Either way, controls remain visible.
+		});
 	}
 
 	function detachPlayer() {

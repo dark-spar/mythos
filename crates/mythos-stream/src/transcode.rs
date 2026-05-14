@@ -58,6 +58,15 @@ pub const SEGMENT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// outpaces realtime), so this only fires on real seeks.
 const MAX_AHEAD_SEGMENTS: u32 = 30;
 
+/// Don't kill a session this young — it's still booting ffmpeg and
+/// would barely produce a segment before being torn down again. A
+/// segment request that arrives during this window for an incompatible
+/// offset gets a "too early, try again in a bit" error rather than
+/// triggering an immediate restart, which protects against rogue
+/// clients (a forgotten browser tab, an extension fetching across the
+/// timeline) stampeding ffmpeg into never producing anything.
+const RESTART_GRACE_PERIOD: Duration = Duration::from_secs(3);
+
 #[derive(Debug, Error)]
 pub enum TranscodeError {
     #[error("ffmpeg failed to start: {0}")]
@@ -70,6 +79,8 @@ pub enum TranscodeError {
     InvalidFilename(String),
     #[error("requested segment {requested} is before the session start ({session_start})")]
     BeforeSessionStart { requested: u32, session_start: u32 },
+    #[error("a session was just started for this key; try again shortly")]
+    SessionStillBooting,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -168,6 +179,14 @@ impl TranscodeManager {
     /// `seg_idx` or will be very shortly. Restarts the session if the
     /// requested segment is before its start or too far past its
     /// frontier; reuses otherwise.
+    ///
+    /// If the existing session is younger than
+    /// [`RESTART_GRACE_PERIOD`] and the requested segment isn't
+    /// compatible with it, returns [`TranscodeError::SessionStillBooting`]
+    /// rather than killing the in-flight ffmpeg. The HTTP layer turns
+    /// that into a 503 + `Retry-After`, which protects the manager
+    /// from clients (forgotten tabs, video extensions, etc.) issuing
+    /// rapid segment requests across the timeline.
     pub async fn ensure_session_for_segment(
         &self,
         key: SessionKey,
@@ -188,12 +207,22 @@ impl TranscodeManager {
                         None => seg_idx > existing.start_segment + MAX_AHEAD_SEGMENTS,
                     };
                     if too_far_ahead {
+                        if existing.started_at.elapsed() < RESTART_GRACE_PERIOD {
+                            return Err(TranscodeError::SessionStillBooting);
+                        }
                         true
                     } else {
                         return Ok(existing.clone());
                     }
                 }
-                _ => true,
+                Some(existing) => {
+                    // seg_idx < start_segment — user seeked back.
+                    if existing.started_at.elapsed() < RESTART_GRACE_PERIOD {
+                        return Err(TranscodeError::SessionStillBooting);
+                    }
+                    true
+                }
+                None => true,
             }
         };
         if !needs_restart {
@@ -340,12 +369,33 @@ async fn launch_ffmpeg(
     cmd.args(accel.decode_args());
     cmd.arg("-ss")
         .arg(format!("{offset_seconds:.3}"))
+        .arg("-accurate_seek")
         .arg("-i")
         .arg(input)
         .arg("-map")
         .arg("0:v:0")
         .arg("-map")
-        .arg("0:a:0?");
+        .arg("0:a:0?")
+        // -copyts (+ muxdelay/muxpreload 0) preserves the source's
+        // wall-clock PTS through the encoder, so segment N really
+        // starts at N * SEGMENT_DURATION_SECS in the player's
+        // timeline rather than at PTS 0. Without this, hls.js sees
+        // segments whose internal PTS resets to 0 each session and
+        // gradually decides the movie is shorter than it actually
+        // is — which is exactly the "timeline shrinks, skip to end"
+        // failure mode after a seek triggers a session restart.
+        .arg("-copyts")
+        .arg("-muxdelay")
+        .arg("0")
+        .arg("-muxpreload")
+        .arg("0")
+        // Force keyframes at every segment boundary on the *encoder*
+        // side so each segment is independently decodable regardless
+        // of the source's keyframe layout. (independent_segments on
+        // the HLS muxer alone isn't enough when the source's GOPs
+        // don't align to our 6s grid.)
+        .arg("-force_key_frames")
+        .arg(format!("expr:gte(t,n_forced*{SEGMENT_DURATION_SECS})"));
     cmd.args(accel.encode_args());
     cmd.arg("-c:a")
         .arg("aac")

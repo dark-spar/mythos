@@ -61,28 +61,23 @@ impl HwAccel {
         }
     }
 
-    /// Flags that go BEFORE `-i` to enable HW-accelerated decode where
-    /// available. Returned as a flat `Vec<&str>` so the caller can
-    /// `cmd.args(...)` them.
+    /// Flags that go BEFORE `-i`. Currently used only for device
+    /// binding — full HW decode pipelines (`-hwaccel X
+    /// -hwaccel_output_format X`) are intentionally not enabled by
+    /// default because they're fragile across input codecs: a 10-bit
+    /// HEVC source decoded to P010 surfaces breaks h264_vaapi /
+    /// h264_qsv encoding ("No usable encoding profile found"), and a
+    /// codec the GPU can't decode at all (less common) hangs the
+    /// pipeline. We use SW decode + HW encode for now — the encode
+    /// side is the bigger cost for any transcode-to-H.264, so we keep
+    /// most of the win without the fragility.
     ///
-    /// For most production HEVC->H.264 transcodes the decode side is
-    /// the bigger CPU cost — pulling HEVC frames out of an mkv on
-    /// the CPU then handing them to GPU encode still costs an entire
-    /// core. With HW decode the whole pipeline lives on the GPU.
+    /// VAAPI still needs `-vaapi_device` here because the encoder
+    /// itself binds to a device handle, not because decode runs on it.
     pub fn decode_args(self) -> &'static [&'static str] {
         match self {
-            HwAccel::Qsv => &["-hwaccel", "qsv", "-hwaccel_output_format", "qsv"],
-            HwAccel::Vaapi => &[
-                "-hwaccel",
-                "vaapi",
-                "-vaapi_device",
-                "/dev/dri/renderD128",
-                "-hwaccel_output_format",
-                "vaapi",
-            ],
-            HwAccel::Nvenc => &["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"],
-            HwAccel::VideoToolbox => &["-hwaccel", "videotoolbox"],
-            HwAccel::Cpu => &[],
+            HwAccel::Vaapi => &["-vaapi_device", "/dev/dri/renderD128"],
+            HwAccel::Qsv | HwAccel::Nvenc | HwAccel::VideoToolbox | HwAccel::Cpu => &[],
         }
     }
 
@@ -113,12 +108,14 @@ impl HwAccel {
                 "23".into(),
             ],
             HwAccel::Vaapi => vec![
-                // `format=nv12|vaapi,hwupload` accepts frames already on the
-                // GPU (when HW decode is active) and uploads from CPU when
-                // they aren't, so the same args work whether or not the
-                // input codec is HW-decodable.
+                // Force NV12 in CPU memory (so 10-bit HEVC sources get
+                // tonemapped to 8-bit before reaching the encoder),
+                // then upload the surface to the GPU for h264_vaapi.
+                // Without this, sources in P010 / yuv420p10le hit
+                // "No usable encoding profile found" because mainline
+                // VAAPI doesn't support High10 AVC encoding.
                 "-vf".into(),
-                "format=nv12|vaapi,hwupload".into(),
+                "format=nv12,hwupload".into(),
                 "-c:v".into(),
                 "h264_vaapi".into(),
                 "-qp".into(),

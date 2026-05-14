@@ -186,6 +186,13 @@ fn map_transcode_error(err: TranscodeError) -> ApiError {
             // so the player retries.
             ApiError::new(StatusCode::NOT_FOUND, "segment_not_ready")
         }
+        TranscodeError::SessionStillBooting => {
+            // The current session is too young to be replaced. The
+            // requested segment isn't compatible with what it'll
+            // produce, but killing it now would just leave nobody
+            // producing anything. Tell the client to wait and retry.
+            ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "session_booting")
+        }
         TranscodeError::Io(io) => {
             tracing::error!(?io, "transcode io error");
             ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal")

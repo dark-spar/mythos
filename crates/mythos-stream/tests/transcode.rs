@@ -102,14 +102,27 @@ async fn segment_before_session_start_forces_restart() {
     let first_started = first.started_at;
     drop(first);
 
-    // Asking for an earlier segment must restart.
+    // Inside the startup grace period, an incompatible request errors
+    // rather than killing the in-flight session.
+    match manager
+        .ensure_session_for_segment(k.clone(), &input, 0)
+        .await
+    {
+        Err(mythos_stream::TranscodeError::SessionStillBooting) => {}
+        Err(other) => panic!("expected SessionStillBooting, got {other:?}"),
+        Ok(_) => panic!("expected SessionStillBooting, got Ok(session)"),
+    }
+
+    // After the grace period elapses, the same incompatible request
+    // does restart cleanly.
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
     let second = manager
         .ensure_session_for_segment(k, &input, 0)
         .await
         .unwrap();
     assert!(
         second.started_at > first_started,
-        "earlier segment must restart the session"
+        "earlier segment must restart the session once grace has elapsed"
     );
     assert_eq!(second.start_segment, 0);
 }

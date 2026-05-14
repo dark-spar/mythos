@@ -95,7 +95,21 @@
 		if (Hls.isSupported()) {
 			hls = new Hls({
 				enableWorker: true,
-				lowLatencyMode: false
+				lowLatencyMode: false,
+				// Seeks restart ffmpeg, which takes 2-4s to produce the
+				// first segment of the new position. hls.js's defaults
+				// (20s timeout, 6 retries, nudge-forward on stall) tear
+				// through that startup budget and cascade into the
+				// timeline-corruption death spiral. Give the server
+				// room to actually deliver, and don't move the playhead
+				// while waiting.
+				fragLoadingTimeOut: 35000,
+				fragLoadingMaxRetry: 2,
+				fragLoadingRetryDelay: 2000,
+				manifestLoadingTimeOut: 10000,
+				levelLoadingTimeOut: 10000,
+				nudgeMaxRetry: 0,
+				highBufferWatchdogPeriod: 30
 			});
 			hls.loadSource(playlistUrl);
 			hls.attachMedia(el);

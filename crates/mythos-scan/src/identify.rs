@@ -121,5 +121,4 @@ mod tests {
         assert_eq!(i.title, "family reunion");
         assert_eq!(i.year, None);
     }
-
 }

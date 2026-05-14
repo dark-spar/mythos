@@ -104,10 +104,15 @@ Track which phase we're in; don't pull work forward without a reason.
     filename identifier for `S01E01` / `1x01` with season-dir fallback, TV
     scanner branch keyed on `LibraryKind::Shows`, TMDb TV enrichment
     (`search_tv` + `tv/{id}/season/{n}` + episode stills), read-only
-    `/api/series/*` + `/api/episodes/*` surface for verification.
-  - 3b NEXT: TV browse UI (series grid → seasons → episodes).
-  - 3c: episode playback (stream/play/HLS for episodes; reuse the movies
-    pipeline). Music / photos / books are their own follow-on sub-phases.
+    `/api/series/*` + `/api/episodes/*` surface, basic series grid + detail UI.
+  - 3c (done): Episode playback — `/api/episodes/{id}/{stream,play,progress,hls/*,subtitles/.../vtt}`
+    mirroring the movie surface; `SessionKey { user_id, item_id, kind }` so
+    movie and episode transcode sessions can't collide; shared
+    `Player.svelte` + `lib/player/playback.ts` so `/movie/[id]` and the new
+    `/episodes/[id]` page run on the same component; previous/next episode
+    navigation via `EpisodeRepo::find_neighbors`.
+  - NEXT: music / photos / books (separate sub-phases), continue-watching
+    aggregation across movies + episodes, auto-play-next at episode end.
 - **Phase 4 — HLS transcoding (done).** FFmpeg subprocess manager,
   segmented HLS, seek-by-restart.
 - **Phase 5 — profiles + ABR + hwaccel (done through 5d).** Hardware probe

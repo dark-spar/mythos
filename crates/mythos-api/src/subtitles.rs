@@ -1,6 +1,6 @@
-//! `/api/movies/:id/subtitles/:sub_id/vtt` — extract a text subtitle
-//! track from its container and serve it as WebVTT for the SPA's
-//! `<track>` element.
+//! `/api/{movies|episodes}/:id/subtitles/:sub_id/vtt` — extract a
+//! text subtitle track from its container and serve it as WebVTT for
+//! the SPA's `<track>` element.
 //!
 //! Image-based subs (PGS, VOBSUB, DVB, XSUB) can't be served this way
 //! — they're pre-rasterized bitmaps with positioning baked in, with no
@@ -17,20 +17,20 @@
 //! files are tolerated; they're tiny and re-extraction is cheap if
 //! they need to be remade.
 
-use std::path::PathBuf;
 use std::process::Stdio;
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use mythos_auth::AuthUser;
-use mythos_db::{MovieRepo, SubtitleRepo};
+use mythos_db::SubtitleRepo;
 use sqlx::SqlitePool;
 use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::SubtitlesDir;
 use crate::error::{ApiError, ApiResult};
+use crate::hls::{resolve_episode_to_file, resolve_input_path_for_file, resolve_movie_to_file};
 
 /// 5 minutes. Long enough to scan a feature-length Blu-ray remux,
 /// short enough that a wedged ffmpeg eventually frees the request.
@@ -42,16 +42,31 @@ pub async fn webvtt(
     _user: AuthUser,
     Path((movie_id, sub_id)): Path<(Uuid, Uuid)>,
 ) -> ApiResult<Response> {
-    let movie = MovieRepo::new(pool.clone())
-        .find_by_id(movie_id)
-        .await?
-        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "not_found"))?;
+    let file_id = resolve_movie_to_file(&pool, movie_id).await?;
+    webvtt_for_file(&pool, &cache_dir, file_id, sub_id).await
+}
 
+pub async fn episode_webvtt(
+    State(pool): State<SqlitePool>,
+    State(cache_dir): State<SubtitlesDir>,
+    _user: AuthUser,
+    Path((episode_id, sub_id)): Path<(Uuid, Uuid)>,
+) -> ApiResult<Response> {
+    let file_id = resolve_episode_to_file(&pool, episode_id).await?;
+    webvtt_for_file(&pool, &cache_dir, file_id, sub_id).await
+}
+
+async fn webvtt_for_file(
+    pool: &SqlitePool,
+    cache_dir: &SubtitlesDir,
+    file_id: Uuid,
+    sub_id: Uuid,
+) -> ApiResult<Response> {
     let sub = SubtitleRepo::new(pool.clone())
         .find_by_id(sub_id)
         .await?
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "not_found"))?;
-    if sub.file_id != movie.file_id {
+    if sub.file_id != file_id {
         return Err(ApiError::new(StatusCode::NOT_FOUND, "not_found"));
     }
     if sub.is_image {
@@ -65,7 +80,7 @@ pub async fn webvtt(
     let body = if let Some(cached) = read_if_present(&cache_path).await {
         cached
     } else {
-        let abs = resolve_input_path(&pool, movie_id).await?;
+        let abs = resolve_input_path_for_file(pool, file_id).await?;
         let extracted = extract_webvtt(&abs, sub.stream_index).await?;
         // Write-through cache. Best-effort: a write failure here just
         // means we'll re-extract on the next request.
@@ -103,29 +118,6 @@ async fn write_cache(path: &std::path::Path, body: &[u8]) -> std::io::Result<()>
         tokio::fs::create_dir_all(parent).await?;
     }
     tokio::fs::write(path, body).await
-}
-
-async fn resolve_input_path(pool: &SqlitePool, movie_id: Uuid) -> ApiResult<PathBuf> {
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT l.root_path, f.path \
-         FROM movies m \
-         JOIN media_files f ON f.id = m.file_id \
-         JOIN libraries  l ON l.id = m.library_id \
-         WHERE m.id = ?",
-    )
-    .bind(movie_id.to_string())
-    .fetch_optional(pool)
-    .await
-    .map_err(|err| {
-        tracing::error!(?err, "subtitle input lookup failed");
-        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal")
-    })?;
-    let (root, rel) = row.ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "not_found"))?;
-    let abs = PathBuf::from(root).join(rel);
-    if !tokio::fs::try_exists(&abs).await.unwrap_or(false) {
-        return Err(ApiError::new(StatusCode::NOT_FOUND, "file_missing"));
-    }
-    Ok(abs)
 }
 
 async fn extract_webvtt(input: &std::path::Path, stream_index: i64) -> ApiResult<Vec<u8>> {

@@ -15,7 +15,7 @@ pub use abr::{
 };
 pub use hwaccel::{HwAccel, resolve as resolve_hwaccel};
 pub use transcode::{
-    SEGMENT_DURATION_SECS, SEGMENT_WAIT_TIMEOUT, SessionKey, TranscodeError, TranscodeManager,
-    TranscodeSession, build_master_playlist, build_variant_playlist, parse_segment_filename,
-    wait_for_file,
+    ItemKind, SEGMENT_DURATION_SECS, SEGMENT_WAIT_TIMEOUT, SessionKey, TranscodeError,
+    TranscodeManager, TranscodeSession, build_master_playlist, build_variant_playlist,
+    parse_segment_filename, wait_for_file,
 };

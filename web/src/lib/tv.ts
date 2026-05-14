@@ -58,12 +58,21 @@ export interface SeasonDetail {
 	episodes: Episode[];
 }
 
+export interface EpisodeProgress {
+	position_seconds: number;
+	duration_seconds: number;
+	updated_at: string;
+}
+
 export interface EpisodeDetail {
 	episode: Episode;
 	season: Season;
 	series: Series;
 	file: MediaFile;
 	subtitles: SubtitleTrack[];
+	prev: Episode | null;
+	next: Episode | null;
+	progress: EpisodeProgress | null;
 }
 
 export const listSeries = (

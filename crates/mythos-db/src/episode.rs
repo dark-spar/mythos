@@ -106,6 +106,52 @@ impl EpisodeRepo {
         row.map(EpisodeRow::into_episode).transpose()
     }
 
+    /// Return `(previous, next)` for `episode_id` — adjacent episodes
+    /// in the same series, ordered by `(season_number,
+    /// episode_number)`. Crosses season boundaries at the ends.
+    /// Returns `(None, None)` if the episode doesn't exist or is the
+    /// only one in its series.
+    pub async fn find_neighbors(
+        &self,
+        episode_id: Uuid,
+    ) -> Result<(Option<Episode>, Option<Episode>)> {
+        let series_row: Option<(String,)> = sqlx::query_as(
+            "SELECT s.series_id FROM episodes e \
+             JOIN seasons s ON s.id = e.season_id \
+             WHERE e.id = ?",
+        )
+        .bind(episode_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some((series_id,)) = series_row else {
+            return Ok((None, None));
+        };
+
+        let rows: Vec<EpisodeRow> = sqlx::query_as(
+            "SELECT e.id, e.season_id, e.file_id, e.episode_number, e.title, \
+                    e.tmdb_id, e.overview, e.still_url, e.air_date, \
+                    e.created_at, e.updated_at \
+             FROM episodes e \
+             JOIN seasons s ON s.id = e.season_id \
+             WHERE s.series_id = ? \
+             ORDER BY s.season_number ASC, e.episode_number ASC",
+        )
+        .bind(series_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let episodes: Vec<Episode> = rows
+            .into_iter()
+            .map(EpisodeRow::into_episode)
+            .collect::<Result<_>>()?;
+        let Some(i) = episodes.iter().position(|e| e.id == episode_id) else {
+            return Ok((None, None));
+        };
+        let prev = i.checked_sub(1).and_then(|p| episodes.get(p).cloned());
+        let next = episodes.get(i + 1).cloned();
+        Ok((prev, next))
+    }
+
     pub async fn list_by_season(&self, season_id: Uuid) -> Result<Vec<Episode>> {
         let rows: Vec<EpisodeRow> = sqlx::query_as(
             "SELECT id, season_id, file_id, episode_number, title, \

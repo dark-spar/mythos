@@ -1,13 +1,13 @@
-//! `/api/movies/:id/hls/*` handlers (ABR multi-rendition).
+//! `/api/{movies|episodes}/:id/hls/*` handlers (ABR multi-rendition).
 //!
-//! Three endpoints share the routing space:
+//! Three endpoints share the routing space per item kind:
 //!
 //! - `GET .../hls/master.m3u8` — synthetic master playlist listing
 //!   every rendition. Built purely from the ABR ladder constant;
 //!   ffmpeg isn't touched.
 //!
 //! - `GET .../hls/:variant/playlist.m3u8` — synthetic per-variant
-//!   media playlist describing every segment up to the movie's full
+//!   media playlist describing every segment up to the item's full
 //!   duration. Also built without invoking ffmpeg, so the player gets
 //!   the complete timeline up front.
 //!
@@ -19,6 +19,11 @@
 //!   chose to fetch implicitly drives session start_segment.
 //!
 //! `DELETE .../hls` stops the active session for the requesting user.
+//!
+//! Movie and episode handlers each resolve their path param to a
+//! `file_id`, then delegate to the file-id-keyed inner helpers; the
+//! shared `SessionKey { user_id, item_id, kind }` keeps movie and
+//! episode sessions in their own slots.
 
 use std::path::PathBuf;
 
@@ -29,9 +34,9 @@ use mythos_auth::AuthUser;
 use mythos_core::PlaybackMode;
 use mythos_db::SubtitleRepo;
 use mythos_stream::{
-    ABR_LADDER, Rendition, SEGMENT_WAIT_TIMEOUT, SOURCE_VARIANT, SessionKey, TranscodeError,
-    TranscodeManager, build_master_playlist, build_variant_playlist, is_known_variant,
-    parse_segment_filename, rendition_by_name, source_rendition, wait_for_file,
+    ABR_LADDER, ItemKind, Rendition, SEGMENT_WAIT_TIMEOUT, SOURCE_VARIANT, SessionKey,
+    TranscodeError, TranscodeManager, build_master_playlist, build_variant_playlist,
+    is_known_variant, parse_segment_filename, rendition_by_name, source_rendition, wait_for_file,
 };
 use serde::Deserialize;
 use sqlx::SqlitePool;
@@ -67,46 +72,28 @@ impl HlsQuery {
     }
 }
 
+// =========================================================================
+// Movie handlers: resolve movie_id → file_id, then delegate.
+// =========================================================================
+
 pub async fn stop(
     State(hls): State<HlsHandle>,
     user: AuthUser,
     Path(movie_id): Path<Uuid>,
 ) -> Response {
-    if let Some(manager) = hls.0.as_ref() {
-        let key = SessionKey {
-            user_id: user.id,
-            movie_id,
-        };
-        manager.stop(&key).await;
-    }
-    (StatusCode::NO_CONTENT, ()).into_response()
+    stop_inner(&hls, user.id, movie_id, ItemKind::Movie).await
 }
 
-/// Handler for `master.m3u8`.
 pub async fn master(
     State(pool): State<SqlitePool>,
     _user: AuthUser,
     Path(movie_id): Path<Uuid>,
     Query(q): Query<HlsQuery>,
 ) -> ApiResult<Response> {
-    let mode = q.mode_or_default();
-    if mode == PlaybackMode::DirectPlay {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "direct_play_has_no_master",
-        ));
-    }
-    // Validate the movie exists and has a known duration so we don't
-    // hand the player a master that points at variants we can't serve.
-    movie_duration_seconds(&pool, movie_id).await?;
-    let renditions = resolve_renditions(&pool, movie_id, mode, q.v.as_deref()).await?;
-    let query = build_query_string(&pool, movie_id, &q).await?;
-    let body = build_master_playlist(&renditions, &query);
-    Ok(playlist_response(body))
+    let file_id = resolve_movie_to_file(&pool, movie_id).await?;
+    master_inner(&pool, file_id, q).await
 }
 
-/// Handler for everything under `:variant/`. Dispatches between the
-/// per-variant playlist and individual segments.
 pub async fn variant_file(
     State(pool): State<SqlitePool>,
     State(hls): State<HlsHandle>,
@@ -114,19 +101,124 @@ pub async fn variant_file(
     Path((movie_id, variant, filename)): Path<(Uuid, String, String)>,
     Query(q): Query<HlsQuery>,
 ) -> ApiResult<Response> {
+    let file_id = resolve_movie_to_file(&pool, movie_id).await?;
+    variant_file_inner(
+        &pool,
+        &hls,
+        user.id,
+        movie_id,
+        ItemKind::Movie,
+        file_id,
+        variant,
+        filename,
+        q,
+    )
+    .await
+}
+
+// =========================================================================
+// Episode handlers.
+// =========================================================================
+
+pub async fn episode_stop(
+    State(hls): State<HlsHandle>,
+    user: AuthUser,
+    Path(episode_id): Path<Uuid>,
+) -> Response {
+    stop_inner(&hls, user.id, episode_id, ItemKind::Episode).await
+}
+
+pub async fn episode_master(
+    State(pool): State<SqlitePool>,
+    _user: AuthUser,
+    Path(episode_id): Path<Uuid>,
+    Query(q): Query<HlsQuery>,
+) -> ApiResult<Response> {
+    let file_id = resolve_episode_to_file(&pool, episode_id).await?;
+    master_inner(&pool, file_id, q).await
+}
+
+pub async fn episode_variant_file(
+    State(pool): State<SqlitePool>,
+    State(hls): State<HlsHandle>,
+    user: AuthUser,
+    Path((episode_id, variant, filename)): Path<(Uuid, String, String)>,
+    Query(q): Query<HlsQuery>,
+) -> ApiResult<Response> {
+    let file_id = resolve_episode_to_file(&pool, episode_id).await?;
+    variant_file_inner(
+        &pool,
+        &hls,
+        user.id,
+        episode_id,
+        ItemKind::Episode,
+        file_id,
+        variant,
+        filename,
+        q,
+    )
+    .await
+}
+
+// =========================================================================
+// Inner kind-agnostic handlers, keyed on file_id (+ item_id/kind for
+// SessionKey when running ffmpeg).
+// =========================================================================
+
+async fn stop_inner(hls: &HlsHandle, user_id: Uuid, item_id: Uuid, kind: ItemKind) -> Response {
+    if let Some(manager) = hls.0.as_ref() {
+        let key = SessionKey {
+            user_id,
+            item_id,
+            kind,
+        };
+        manager.stop(&key).await;
+    }
+    (StatusCode::NO_CONTENT, ()).into_response()
+}
+
+async fn master_inner(pool: &SqlitePool, file_id: Uuid, q: HlsQuery) -> ApiResult<Response> {
+    let mode = q.mode_or_default();
+    if mode == PlaybackMode::DirectPlay {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "direct_play_has_no_master",
+        ));
+    }
+    // Validate the file has a known duration so we don't hand the
+    // player a master that points at variants we can't serve.
+    file_duration_seconds(pool, file_id).await?;
+    let renditions = resolve_renditions(pool, file_id, mode, q.v.as_deref()).await?;
+    let query = build_query_string(pool, file_id, &q).await?;
+    let body = build_master_playlist(&renditions, &query);
+    Ok(playlist_response(body))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn variant_file_inner(
+    pool: &SqlitePool,
+    hls: &HlsHandle,
+    user_id: Uuid,
+    item_id: Uuid,
+    kind: ItemKind,
+    file_id: Uuid,
+    variant: String,
+    filename: String,
+    q: HlsQuery,
+) -> ApiResult<Response> {
     if !is_known_variant(&variant) {
         return Err(ApiError::new(StatusCode::NOT_FOUND, "unknown_variant"));
     }
     let mode = q.mode_or_default();
-    let renditions = resolve_renditions(&pool, movie_id, mode, q.v.as_deref()).await?;
+    let renditions = resolve_renditions(pool, file_id, mode, q.v.as_deref()).await?;
     let rendition = *renditions
         .iter()
         .find(|r| r.name == variant)
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "unknown_variant"))?;
 
     if filename == "playlist.m3u8" {
-        let duration = movie_duration_seconds(&pool, movie_id).await?;
-        let query = build_query_string(&pool, movie_id, &q).await?;
+        let duration = file_duration_seconds(pool, file_id).await?;
+        let query = build_query_string(pool, file_id, &q).await?;
         let body = build_variant_playlist(duration, &rendition, &query);
         return Ok(playlist_response(body));
     }
@@ -139,11 +231,12 @@ pub async fn variant_file(
         .as_ref()
         .ok_or_else(|| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "transcoding_disabled"))?;
 
-    let abs_path = resolve_input_path(&pool, movie_id).await?;
-    let burn_in_sub = resolve_burn_in_sub(&pool, movie_id, q.sub).await?;
+    let abs_path = resolve_input_path_for_file(pool, file_id).await?;
+    let burn_in_sub = resolve_burn_in_sub(pool, file_id, q.sub).await?;
     let key = SessionKey {
-        user_id: user.id,
-        movie_id,
+        user_id,
+        item_id,
+        kind,
     };
 
     let session = manager
@@ -173,6 +266,10 @@ pub async fn variant_file(
     serve_bytes(&segment_path, "video/mp2t").await
 }
 
+// =========================================================================
+// File-id-keyed lookups (shared between movie and episode paths).
+// =========================================================================
+
 /// Compute the rendition list for the given mode + optional `v=` hint.
 ///
 /// - Copy modes (Remux, TranscodeAudio) always emit a single
@@ -183,12 +280,12 @@ pub async fn variant_file(
 ///   ladder.
 async fn resolve_renditions(
     pool: &SqlitePool,
-    movie_id: Uuid,
+    file_id: Uuid,
     mode: PlaybackMode,
     v: Option<&str>,
 ) -> ApiResult<Vec<Rendition>> {
     if matches!(mode, PlaybackMode::Remux | PlaybackMode::TranscodeAudio) {
-        let info = source_dimensions(pool, movie_id).await?;
+        let info = source_dimensions_for_file(pool, file_id).await?;
         return Ok(vec![source_rendition(
             info.width,
             info.height,
@@ -230,14 +327,13 @@ struct SourceInfo {
     size_bytes: u64,
 }
 
-async fn source_dimensions(pool: &SqlitePool, movie_id: Uuid) -> ApiResult<SourceInfo> {
+async fn source_dimensions_for_file(pool: &SqlitePool, file_id: Uuid) -> ApiResult<SourceInfo> {
     type Row = (Option<i64>, Option<i64>, Option<f64>, i64);
     let row: Option<Row> = sqlx::query_as(
-        "SELECT mf.width, mf.height, mf.duration_seconds, mf.size_bytes \
-         FROM movies m JOIN media_files mf ON mf.id = m.file_id \
-         WHERE m.id = ?",
+        "SELECT width, height, duration_seconds, size_bytes \
+         FROM media_files WHERE id = ?",
     )
-    .bind(movie_id.to_string())
+    .bind(file_id.to_string())
     .fetch_optional(pool)
     .await
     .map_err(|err| {
@@ -267,7 +363,7 @@ async fn source_dimensions(pool: &SqlitePool, movie_id: Uuid) -> ApiResult<Sourc
 /// synthetic playlists, combining `?mode=...`, `?sub=...`, and
 /// `?v=...` from the original request so they propagate through
 /// hls.js relative URL resolution.
-async fn build_query_string(pool: &SqlitePool, movie_id: Uuid, q: &HlsQuery) -> ApiResult<String> {
+async fn build_query_string(pool: &SqlitePool, file_id: Uuid, q: &HlsQuery) -> ApiResult<String> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(mode) = q.mode {
         parts.push(format!("mode={}", mode.as_str()));
@@ -276,7 +372,7 @@ async fn build_query_string(pool: &SqlitePool, movie_id: Uuid, q: &HlsQuery) -> 
         parts.push(format!("v={v}"));
     }
     if let Some(sub_id) = q.sub {
-        let track = lookup_sub_for_movie(pool, movie_id, sub_id).await?;
+        let track = lookup_sub_for_file(pool, file_id, sub_id).await?;
         if track.is_image {
             parts.push(format!("sub={sub_id}"));
         }
@@ -293,37 +389,28 @@ async fn build_query_string(pool: &SqlitePool, movie_id: Uuid, q: &HlsQuery) -> 
 /// the requested sub is text (text subs go via WebVTT sidecar).
 async fn resolve_burn_in_sub(
     pool: &SqlitePool,
-    movie_id: Uuid,
+    file_id: Uuid,
     sub: Option<Uuid>,
 ) -> ApiResult<Option<i64>> {
     let Some(sub_id) = sub else {
         return Ok(None);
     };
-    let track = lookup_sub_for_movie(pool, movie_id, sub_id).await?;
+    let track = lookup_sub_for_file(pool, file_id, sub_id).await?;
     Ok(track.is_image.then_some(track.stream_index))
 }
 
-async fn lookup_sub_for_movie(
+/// Fetch a subtitle track and verify it belongs to `file_id`. Returns
+/// 404 if the sub doesn't exist or belongs to a different file.
+pub(crate) async fn lookup_sub_for_file(
     pool: &SqlitePool,
-    movie_id: Uuid,
+    file_id: Uuid,
     sub_id: Uuid,
 ) -> ApiResult<mythos_core::SubtitleTrack> {
-    let movie_file: Option<(String,)> = sqlx::query_as("SELECT file_id FROM movies WHERE id = ?")
-        .bind(movie_id.to_string())
-        .fetch_optional(pool)
-        .await
-        .map_err(|err| {
-            tracing::error!(?err, "movie file lookup failed");
-            ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal")
-        })?;
-    let file_id_str = movie_file
-        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "not_found"))?
-        .0;
     let track = SubtitleRepo::new(pool.clone())
         .find_by_id(sub_id)
         .await?
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "unknown_subtitle"))?;
-    if track.file_id.to_string() != file_id_str {
+    if track.file_id != file_id {
         return Err(ApiError::new(StatusCode::NOT_FOUND, "unknown_subtitle"));
     }
     Ok(track)
@@ -362,15 +449,17 @@ async fn serve_bytes(path: &std::path::Path, content_type: &'static str) -> ApiR
     }
 }
 
-async fn resolve_input_path(pool: &SqlitePool, movie_id: Uuid) -> ApiResult<PathBuf> {
+/// Look up the absolute path of a file by joining through libraries.
+pub(crate) async fn resolve_input_path_for_file(
+    pool: &SqlitePool,
+    file_id: Uuid,
+) -> ApiResult<PathBuf> {
     let row: Option<(String, String)> = sqlx::query_as(
         "SELECT l.root_path, f.path \
-         FROM movies m \
-         JOIN media_files f ON f.id = m.file_id \
-         JOIN libraries  l ON l.id = m.library_id \
-         WHERE m.id = ?",
+         FROM media_files f JOIN libraries l ON l.id = f.library_id \
+         WHERE f.id = ?",
     )
-    .bind(movie_id.to_string())
+    .bind(file_id.to_string())
     .fetch_optional(pool)
     .await
     .map_err(|err| {
@@ -386,20 +475,16 @@ async fn resolve_input_path(pool: &SqlitePool, movie_id: Uuid) -> ApiResult<Path
     Ok(abs)
 }
 
-async fn movie_duration_seconds(pool: &SqlitePool, movie_id: Uuid) -> ApiResult<f64> {
-    let row: Option<(Option<f64>,)> = sqlx::query_as(
-        "SELECT mf.duration_seconds \
-         FROM movies m \
-         JOIN media_files mf ON mf.id = m.file_id \
-         WHERE m.id = ?",
-    )
-    .bind(movie_id.to_string())
-    .fetch_optional(pool)
-    .await
-    .map_err(|err| {
-        tracing::error!(?err, "hls duration lookup failed");
-        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal")
-    })?;
+async fn file_duration_seconds(pool: &SqlitePool, file_id: Uuid) -> ApiResult<f64> {
+    let row: Option<(Option<f64>,)> =
+        sqlx::query_as("SELECT duration_seconds FROM media_files WHERE id = ?")
+            .bind(file_id.to_string())
+            .fetch_optional(pool)
+            .await
+            .map_err(|err| {
+                tracing::error!(?err, "hls duration lookup failed");
+                ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal")
+            })?;
 
     let dur = row
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "not_found"))?
@@ -412,6 +497,47 @@ async fn movie_duration_seconds(pool: &SqlitePool, movie_id: Uuid) -> ApiResult<
         ));
     }
     Ok(dur)
+}
+
+/// Resolve a movie id to its `file_id`. Returns 404 if missing.
+pub(crate) async fn resolve_movie_to_file(pool: &SqlitePool, movie_id: Uuid) -> ApiResult<Uuid> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT file_id FROM movies WHERE id = ?")
+        .bind(movie_id.to_string())
+        .fetch_optional(pool)
+        .await
+        .map_err(|err| {
+            tracing::error!(?err, "movie file lookup failed");
+            ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal")
+        })?;
+    let file_id_str = row
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "not_found"))?
+        .0;
+    Uuid::parse_str(&file_id_str).map_err(|err| {
+        tracing::error!(?err, "decoded file_id is not a uuid");
+        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal")
+    })
+}
+
+/// Resolve an episode id to its `file_id`. Returns 404 if missing.
+pub(crate) async fn resolve_episode_to_file(
+    pool: &SqlitePool,
+    episode_id: Uuid,
+) -> ApiResult<Uuid> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT file_id FROM episodes WHERE id = ?")
+        .bind(episode_id.to_string())
+        .fetch_optional(pool)
+        .await
+        .map_err(|err| {
+            tracing::error!(?err, "episode file lookup failed");
+            ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal")
+        })?;
+    let file_id_str = row
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "not_found"))?
+        .0;
+    Uuid::parse_str(&file_id_str).map_err(|err| {
+        tracing::error!(?err, "decoded file_id is not a uuid");
+        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal")
+    })
 }
 
 fn map_transcode_error(err: TranscodeError) -> ApiError {

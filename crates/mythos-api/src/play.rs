@@ -1,4 +1,5 @@
-//! `POST /api/movies/:id/play` — per-request playback decision.
+//! `POST /api/{movies|episodes}/:id/play` — per-request playback
+//! decision.
 //!
 //! Client sends what it can decode (codec/container/resolution
 //! caps); server consults the source file's technical metadata and
@@ -13,8 +14,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use mythos_auth::AuthUser;
 use mythos_core::{ClientProfile, MediaCapabilities, PlaybackMode, PlaybackPlan, decide};
-use mythos_db::{MediaFileRepo, MovieRepo};
-use mythos_stream::ABR_LADDER as ABR_RENDITION_LIST;
+use mythos_db::{EpisodeRepo, MediaFileRepo, MovieRepo};
+use mythos_stream::{ABR_LADDER as ABR_RENDITION_LIST, ItemKind};
 use serde::Serialize;
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -25,8 +26,9 @@ use crate::error::{ApiError, ApiResult};
 pub struct PlayResponse {
     pub mode: PlaybackMode,
     /// Relative URL the client should load. Direct-play returns
-    /// `/api/movies/:id/stream`; everything else returns an HLS
-    /// master URL with `mode=...` and any rendition filter baked in.
+    /// `/api/{movies|episodes}/:id/stream`; everything else returns
+    /// an HLS master URL with `mode=...` and any rendition filter
+    /// baked in.
     pub stream_url: String,
     /// For HLS-based modes, the ABR tier names this client is
     /// expected to play. Driven by `ClientProfile.max_height` —
@@ -56,8 +58,38 @@ pub async fn play(
         .find_by_id(movie_id)
         .await?
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "not_found"))?;
-    let file = MediaFileRepo::new(pool)
-        .find_by_id(movie.file_id)
+    decide_for_item(&pool, ItemKind::Movie, movie_id, movie.file_id, profile).await
+}
+
+pub async fn episode_play(
+    State(pool): State<SqlitePool>,
+    _user: AuthUser,
+    Path(episode_id): Path<Uuid>,
+    Json(profile): Json<ClientProfile>,
+) -> ApiResult<Json<PlayResponse>> {
+    let episode = EpisodeRepo::new(pool.clone())
+        .find_by_id(episode_id)
+        .await?
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "not_found"))?;
+    decide_for_item(
+        &pool,
+        ItemKind::Episode,
+        episode_id,
+        episode.file_id,
+        profile,
+    )
+    .await
+}
+
+async fn decide_for_item(
+    pool: &SqlitePool,
+    kind: ItemKind,
+    item_id: Uuid,
+    file_id: Uuid,
+    profile: ClientProfile,
+) -> ApiResult<Json<PlayResponse>> {
+    let file = MediaFileRepo::new(pool.clone())
+        .find_by_id(file_id)
         .await?
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "file_missing"))?;
 
@@ -76,7 +108,7 @@ pub async fn play(
 
     let plan: PlaybackPlan = decide(caps, &profile);
     let allowed = allowed_renditions(plan.mode, &profile);
-    let stream_url = build_stream_url(movie_id, plan.mode, &allowed);
+    let stream_url = build_stream_url(kind, item_id, plan.mode, &allowed);
 
     Ok(Json(PlayResponse {
         mode: plan.mode,
@@ -116,19 +148,20 @@ fn allowed_renditions(mode: PlaybackMode, profile: &ClientProfile) -> Vec<&'stat
     chosen
 }
 
-fn build_stream_url(movie_id: Uuid, mode: PlaybackMode, allowed: &[&str]) -> String {
+fn build_stream_url(kind: ItemKind, item_id: Uuid, mode: PlaybackMode, allowed: &[&str]) -> String {
+    let base = kind.as_slug();
     match mode {
-        PlaybackMode::DirectPlay => format!("/api/movies/{movie_id}/stream"),
+        PlaybackMode::DirectPlay => format!("/api/{base}/{item_id}/stream"),
         PlaybackMode::Remux | PlaybackMode::TranscodeAudio => {
             format!(
-                "/api/movies/{movie_id}/hls/master.m3u8?mode={}",
+                "/api/{base}/{item_id}/hls/master.m3u8?mode={}",
                 mode.as_str()
             )
         }
         PlaybackMode::TranscodeVideo | PlaybackMode::TranscodeFull => {
             let v = allowed.join(",");
             format!(
-                "/api/movies/{movie_id}/hls/master.m3u8?mode={}&v={v}",
+                "/api/{base}/{item_id}/hls/master.m3u8?mode={}&v={v}",
                 mode.as_str()
             )
         }

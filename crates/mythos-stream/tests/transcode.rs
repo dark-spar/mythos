@@ -8,7 +8,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use mythos_core::PlaybackMode;
-use mythos_stream::{ABR_LADDER, SessionKey, TranscodeManager, wait_for_file};
+use mythos_stream::{ABR_LADDER, ItemKind, SessionKey, TranscodeManager, wait_for_file};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -48,7 +48,8 @@ fn make_test_input(dir: &std::path::Path) -> PathBuf {
 fn key() -> SessionKey {
     SessionKey {
         user_id: Uuid::now_v7(),
-        movie_id: Uuid::now_v7(),
+        item_id: Uuid::now_v7(),
+        kind: ItemKind::Movie,
     }
 }
 

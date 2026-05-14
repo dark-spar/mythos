@@ -8,6 +8,7 @@ pub mod movie;
 pub mod play;
 pub mod scan;
 pub mod settings;
+pub mod stream;
 pub mod subtitles;
 pub mod tv;
 
@@ -160,6 +161,28 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/api/episodes/{id}", get(tv::get_episode))
         .route("/api/episodes/{id}/still", get(tv::episode_still))
+        .route("/api/episodes/{id}/stream", get(tv::episode_stream))
+        .route("/api/episodes/{id}/play", post(play::episode_play))
+        .route(
+            "/api/episodes/{id}/progress",
+            axum::routing::put(tv::episode_put_progress),
+        )
+        .route(
+            "/api/episodes/{id}/hls/master.m3u8",
+            get(hls::episode_master),
+        )
+        .route(
+            "/api/episodes/{id}/hls/{variant}/{filename}",
+            get(hls::episode_variant_file),
+        )
+        .route(
+            "/api/episodes/{id}/hls",
+            axum::routing::delete(hls::episode_stop),
+        )
+        .route(
+            "/api/episodes/{id}/subtitles/{sub_id}/vtt",
+            get(subtitles::episode_webvtt),
+        )
         .route(
             "/api/settings",
             get(settings::get_settings).put(settings::put_settings),

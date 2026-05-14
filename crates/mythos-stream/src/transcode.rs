@@ -1,7 +1,9 @@
 //! Live HLS transcoding session manager.
 //!
-//! One ffmpeg subprocess per `(user_id, movie_id)` key. Sessions are
-//! identified by their `start_segment`: calling
+//! One ffmpeg subprocess per `(user_id, item_id, kind)` key, where
+//! `kind` distinguishes movie sessions from episode sessions so a
+//! movie UUID and an episode UUID with the same string never collide.
+//! Sessions are identified by their `start_segment`: calling
 //! [`TranscodeManager::ensure_session_for_segment`] with a segment
 //! that's within the current session's window reuses the running
 //! ffmpeg; a request before the session start, or far past its
@@ -87,10 +89,31 @@ pub enum TranscodeError {
     SessionStillBooting,
 }
 
+/// Which kind of media item a transcode session belongs to. Mirrors
+/// the `/api/{movies,episodes}/{id}/hls/...` route split and keeps the
+/// session work-dir layout self-describing.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum ItemKind {
+    Movie,
+    Episode,
+}
+
+impl ItemKind {
+    /// Lower-case slug for log lines, URL segments, and the on-disk
+    /// session work-dir layout (`work_root/{user}/{kind}/{item_id}`).
+    pub const fn as_slug(self) -> &'static str {
+        match self {
+            ItemKind::Movie => "movies",
+            ItemKind::Episode => "episodes",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct SessionKey {
     pub user_id: Uuid,
-    pub movie_id: Uuid,
+    pub item_id: Uuid,
+    pub kind: ItemKind,
 }
 
 pub struct TranscodeSession {
@@ -318,7 +341,8 @@ impl TranscodeManager {
         if let Some(existing) = sessions.remove(&key) {
             debug!(
                 user = %existing.key.user_id,
-                movie = %existing.key.movie_id,
+                kind = existing.key.kind.as_slug(),
+                item = %existing.key.item_id,
                 old_start = existing.start_segment,
                 new_start = seg_idx,
                 "restarting transcode session"
@@ -331,7 +355,8 @@ impl TranscodeManager {
             .inner
             .work_root
             .join(key.user_id.to_string())
-            .join(key.movie_id.to_string());
+            .join(key.kind.as_slug())
+            .join(key.item_id.to_string());
         tokio::fs::create_dir_all(&work_dir).await?;
         // ffmpeg's HLS muxer doesn't auto-create per-variant subdirs
         // when `%v` is in `-hls_segment_filename`; pre-create them.
@@ -351,7 +376,8 @@ impl TranscodeManager {
         };
         info!(
             user = %key.user_id,
-            movie = %key.movie_id,
+            kind = key.kind.as_slug(),
+            item = %key.item_id,
             seg_idx,
             offset_seconds,
             mode = mode.as_str(),
@@ -425,7 +451,8 @@ impl TranscodeManager {
         for session in to_kill {
             info!(
                 user = %session.key.user_id,
-                movie = %session.key.movie_id,
+                kind = session.key.kind.as_slug(),
+                item = %session.key.item_id,
                 "reaping idle transcode session"
             );
             session.kill().await;
@@ -731,6 +758,30 @@ pub fn build_variant_playlist(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_key_discriminates_movie_from_episode_with_same_uuid() {
+        // The whole point of ItemKind in SessionKey: a movie and an
+        // episode with happen-to-be-identical UUIDs (astronomically
+        // rare in practice but still possible) get distinct sessions
+        // in the manager's HashMap.
+        use std::collections::HashSet;
+        let user = Uuid::now_v7();
+        let id = Uuid::now_v7();
+        let movie = SessionKey {
+            user_id: user,
+            item_id: id,
+            kind: ItemKind::Movie,
+        };
+        let episode = SessionKey {
+            user_id: user,
+            item_id: id,
+            kind: ItemKind::Episode,
+        };
+        assert_ne!(movie, episode);
+        let set: HashSet<_> = [movie, episode].into_iter().collect();
+        assert_eq!(set.len(), 2);
+    }
 
     #[test]
     fn parse_segment_filename_accepts_well_formed_names() {

@@ -130,34 +130,39 @@
 						{#if episodesBySeason[season.id]?.length}
 							<ul class="mt-4 divide-y divide-zinc-200 dark:divide-zinc-800">
 								{#each episodesBySeason[season.id] as ep (ep.id)}
-									<li class="flex items-start gap-3 py-3">
-										{#if ep.still_url}
-											<img
-												src={ep.still_url}
-												alt=""
-												loading="lazy"
-												class="aspect-video w-32 shrink-0 rounded bg-zinc-100 object-cover dark:bg-zinc-900"
-											/>
-										{:else}
-											<div
-												class="aspect-video w-32 shrink-0 rounded bg-zinc-100 dark:bg-zinc-900"
-											></div>
-										{/if}
-										<div class="min-w-0 flex-1">
-											<p class="text-sm font-medium text-zinc-900 dark:text-zinc-100">
-												{episodeLabel(ep)}
-											</p>
-											{#if ep.air_date}
-												<p class="text-xs text-zinc-500">{ep.air_date}</p>
+									<li>
+										<a
+											href={resolve(`/episodes/${ep.id}`)}
+											class="flex items-start gap-3 py-3 transition hover:opacity-80"
+										>
+											{#if ep.still_url}
+												<img
+													src={ep.still_url}
+													alt=""
+													loading="lazy"
+													class="aspect-video w-32 shrink-0 rounded bg-zinc-100 object-cover dark:bg-zinc-900"
+												/>
+											{:else}
+												<div
+													class="aspect-video w-32 shrink-0 rounded bg-zinc-100 dark:bg-zinc-900"
+												></div>
 											{/if}
-											{#if ep.overview}
-												<p
-													class="mt-1 line-clamp-3 max-w-prose text-xs text-zinc-600 dark:text-zinc-400"
-												>
-													{ep.overview}
+											<div class="min-w-0 flex-1">
+												<p class="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+													{episodeLabel(ep)}
 												</p>
-											{/if}
-										</div>
+												{#if ep.air_date}
+													<p class="text-xs text-zinc-500">{ep.air_date}</p>
+												{/if}
+												{#if ep.overview}
+													<p
+														class="mt-1 line-clamp-3 max-w-prose text-xs text-zinc-600 dark:text-zinc-400"
+													>
+														{ep.overview}
+													</p>
+												{/if}
+											</div>
+										</a>
 									</li>
 								{/each}
 							</ul>

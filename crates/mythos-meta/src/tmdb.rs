@@ -123,7 +123,6 @@ impl TmdbClient {
         self.wait_for_slot().await;
 
         let mut params: Vec<(&str, String)> = vec![
-            ("api_key", self.cfg.api_key.clone()),
             ("query", title.to_string()),
             ("include_adult", "false".to_string()),
             ("language", "en-US".to_string()),
@@ -133,7 +132,18 @@ impl TmdbClient {
         }
 
         let url = format!("{}/search/movie", self.cfg.api_base);
-        let res = self.http.get(&url).query(&params).send().await?;
+        let mut req = self.http.get(&url).query(&params);
+        // TMDb v4 read-access tokens are JWTs (header.payload.signature)
+        // and must be sent as `Authorization: Bearer <token>`. v3 API
+        // keys are 32-char hex and go in the `api_key` query param.
+        // Detecting on the presence of a dot keeps the contract simple
+        // — neither key shape ever contains a literal dot.
+        if is_v4_token(&self.cfg.api_key) {
+            req = req.bearer_auth(&self.cfg.api_key);
+        } else {
+            req = req.query(&[("api_key", &self.cfg.api_key)]);
+        }
+        let res = req.send().await?;
         let status = res.status();
         if !status.is_success() {
             return Err(TmdbError::Status(status));
@@ -206,6 +216,13 @@ impl TmdbClient {
 
 pub fn poster_file_path(posters_dir: &Path, movie_id: &str) -> PathBuf {
     posters_dir.join(format!("{movie_id}.jpg"))
+}
+
+/// True if `key` looks like a TMDb v4 access token (a JWT with three
+/// dot-separated parts). v3 API keys are 32-character hex with no
+/// dots, so this is a reliable discriminator.
+fn is_v4_token(key: &str) -> bool {
+    key.contains('.')
 }
 
 #[derive(Debug, Deserialize)]

@@ -25,7 +25,8 @@ struct MockState {
 
 #[derive(Debug, Deserialize)]
 struct SearchQuery {
-    api_key: String,
+    #[serde(default)]
+    api_key: Option<String>,
     query: String,
     #[serde(default)]
     year: Option<i64>,
@@ -40,9 +41,18 @@ async fn spawn_mock() -> (String, String, MockState) {
             "/search/movie",
             get(
                 |axum::extract::State(s): axum::extract::State<MockState>,
+                 headers: axum::http::HeaderMap,
                  Query(q): Query<SearchQuery>| async move {
                     s.search_calls.fetch_add(1, Ordering::SeqCst);
-                    assert!(!q.api_key.is_empty(), "api_key must be forwarded");
+                    let bearer = headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.strip_prefix("Bearer "));
+                    let has_query_key = q.api_key.as_deref().is_some_and(|s| !s.is_empty());
+                    assert!(
+                        bearer.is_some() || has_query_key,
+                        "request must authenticate via Bearer or api_key"
+                    );
                     if q.query.eq_ignore_ascii_case("Inception") && q.year == Some(2010) {
                         Json(json!({
                             "results": [{
@@ -97,6 +107,66 @@ fn client_for(api_base: String, image_base: String, posters_dir: &std::path::Pat
         poster_size: "w500".to_string(),
         posters_dir: posters_dir.to_path_buf(),
     })
+}
+
+#[tokio::test]
+async fn v4_jwt_token_authenticates_via_bearer_header() {
+    use axum::http::header::AUTHORIZATION;
+    use std::sync::atomic::AtomicUsize;
+
+    let saw_bearer = Arc::new(AtomicUsize::new(0));
+    let saw_query = Arc::new(AtomicUsize::new(0));
+    let bearer_clone = saw_bearer.clone();
+    let query_clone = saw_query.clone();
+
+    let app = Router::new().route(
+        "/search/movie",
+        get(
+            move |headers: axum::http::HeaderMap, Query(q): Query<SearchQuery>| {
+                let bearer_clone = bearer_clone.clone();
+                let query_clone = query_clone.clone();
+                async move {
+                    if headers
+                        .get(AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok())
+                        .is_some_and(|v| v.starts_with("Bearer "))
+                    {
+                        bearer_clone.fetch_add(1, Ordering::SeqCst);
+                    }
+                    if q.api_key.is_some() {
+                        query_clone.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Json(json!({ "results": [] }))
+                }
+            },
+        ),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let dir = TempDir::new().unwrap();
+    let client = TmdbClient::new(TmdbConfig {
+        api_key: "eyJhbGciOi.JIUzI1NiJ9.PBydlpFlf".to_string(),
+        api_base: format!("http://{addr}"),
+        image_base: format!("http://{addr}/t/p"),
+        poster_size: "w500".to_string(),
+        posters_dir: dir.path().to_path_buf(),
+    });
+    let _ = client.search_movie("anything", None).await;
+
+    assert_eq!(
+        saw_bearer.load(Ordering::SeqCst),
+        1,
+        "v4 JWT token should be sent as Bearer auth"
+    );
+    assert_eq!(
+        saw_query.load(Ordering::SeqCst),
+        0,
+        "v4 JWT token must not also appear in the api_key query param"
+    );
 }
 
 #[tokio::test]

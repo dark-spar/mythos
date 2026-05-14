@@ -1,1 +1,33 @@
 @import 'tailwindcss';
+
+/*
+ * Force dark mode app-wide. `<html>` always has the `dark` class
+ * (see app.html), so every `dark:` variant in the existing
+ * Tailwind classes is always active — no more reliance on the
+ * user's `prefers-color-scheme` to decide whether the UI is
+ * readable.
+ *
+ * The default `dark:` variant in Tailwind 4 keys off the media
+ * query; this @custom-variant flips it to a class-based selector
+ * so we can drive it ourselves.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * Page background.
+ *
+ * Plex-style dark grey by default — close enough to #1f1f1f to read
+ * as "very dark grey, not black", so the player page (which uses
+ * bg-black explicitly) still feels visually distinct.
+ *
+ * Routes that override with `bg-black` (the movie player) or any
+ * other class still win because their `<main>` sits on top of this
+ * body bg.
+ */
+@layer base {
+	html,
+	body {
+		background-color: #1c1c1f;
+		color: #e4e4e7; /* zinc-200 — readable on dark grey */
+	}
+}

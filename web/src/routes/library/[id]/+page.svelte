@@ -50,7 +50,7 @@
 	<title>{library?.name ?? 'Library'} — Mythos</title>
 </svelte:head>
 
-<main class="mx-auto max-w-6xl px-6 py-12">
+<main class="px-6 py-12 sm:px-8">
 	<a
 		href={resolve('/')}
 		class="text-sm text-zinc-500 underline-offset-2 hover:text-zinc-900 hover:underline dark:hover:text-zinc-100"
@@ -80,9 +80,13 @@
 				{/if}
 			</p>
 		{:else}
-			<ul
-				class="mt-10 grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6"
-			>
+			<!--
+				auto-fill + minmax lets the grid pack as many tiles as
+				fit at the current viewport width, growing smoothly
+				instead of jumping between fixed column counts. ~160px
+				is roughly Plex/Jellyfin's tile floor.
+			-->
+			<ul class="mt-10 grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-4 sm:gap-5">
 				{#each movies as movie (movie.id)}
 					<li>
 						<a href={resolve(`/movie/${movie.id}`)} class="block transition hover:opacity-80">

@@ -29,7 +29,10 @@ async fn setup() -> (Router, SqlitePool, TempDir) {
     let token = TokenConfig::new(Arc::<[u8]>::from(TEST_SECRET), Duration::from_secs(60 * 60));
     let cookies = CookieConfig { secure: false };
     let transcode_dir = TempDir::new().unwrap();
-    let manager = TranscodeManager::new(transcode_dir.path().to_path_buf());
+    let manager = TranscodeManager::new(
+        transcode_dir.path().to_path_buf(),
+        mythos_stream::HwAccel::Cpu,
+    );
     let router = mythos_api::router(ApiState {
         db: pool.clone(),
         token,

@@ -3,7 +3,7 @@ use axum::Router;
 use mythos_api::{CookieConfig, HlsHandle, PostersDir, ScanTracker, TmdbHandle};
 use mythos_auth::TokenConfig;
 use mythos_meta::{TmdbClient, TmdbConfig};
-use mythos_stream::TranscodeManager;
+use mythos_stream::{TranscodeManager, resolve_hwaccel};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -62,7 +62,16 @@ async fn main() -> Result<()> {
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }
-    let hls = HlsHandle(Some(TranscodeManager::new(transcode_dir)));
+    let hw_mode = std::env::var("MYTHOS_HW_ENCODER").unwrap_or_else(|_| "auto".to_string());
+    let accel = resolve_hwaccel(&hw_mode)
+        .await
+        .context("resolving hardware encoder")?;
+    info!(
+        encoder = accel.as_str(),
+        ffmpeg = accel.h264_encoder(),
+        "hardware encoder resolved"
+    );
+    let hls = HlsHandle(Some(TranscodeManager::new(transcode_dir, accel)));
 
     // Periodic reaper for idle transcode sessions. Runs every minute,
     // kills any session with no segment-request activity in 5 minutes.

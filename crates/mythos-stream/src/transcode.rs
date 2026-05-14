@@ -34,6 +34,8 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info};
 use uuid::Uuid;
 
+use crate::hwaccel::HwAccel;
+
 /// Target HLS segment duration in seconds. Anything that builds the
 /// synthetic playlist must use this same constant or the playlist's
 /// `#EXTINF` durations won't line up with what ffmpeg actually
@@ -144,16 +146,22 @@ pub struct TranscodeManager {
 struct ManagerInner {
     work_root: PathBuf,
     sessions: RwLock<HashMap<SessionKey, Arc<TranscodeSession>>>,
+    accel: HwAccel,
 }
 
 impl TranscodeManager {
-    pub fn new(work_root: PathBuf) -> Self {
+    pub fn new(work_root: PathBuf, accel: HwAccel) -> Self {
         Self {
             inner: Arc::new(ManagerInner {
                 work_root,
                 sessions: RwLock::new(HashMap::new()),
+                accel,
             }),
         }
+    }
+
+    pub fn hwaccel(&self) -> HwAccel {
+        self.inner.accel
     }
 
     /// Return a session that's either currently transcoding segment
@@ -232,7 +240,7 @@ impl TranscodeManager {
             "starting ffmpeg transcode session"
         );
 
-        let child = launch_ffmpeg(input_path, &work_dir, offset_seconds)
+        let child = launch_ffmpeg(input_path, &work_dir, offset_seconds, self.inner.accel)
             .await
             .map_err(TranscodeError::Spawn)?;
 
@@ -315,6 +323,7 @@ async fn launch_ffmpeg(
     input: &Path,
     work_dir: &Path,
     offset_seconds: f64,
+    accel: HwAccel,
 ) -> std::io::Result<Child> {
     let playlist = work_dir.join("playlist.m3u8");
     let segment_pattern = work_dir.join("seg-%d.ts");
@@ -324,28 +333,21 @@ async fn launch_ffmpeg(
     // frame-exact — the player adjusts. Fast seek keeps startup
     // latency low.
     let mut cmd = Command::new("ffmpeg");
-    cmd.arg("-hide_banner")
-        .arg("-loglevel")
-        .arg("warning")
-        .arg("-ss")
+    cmd.arg("-hide_banner").arg("-loglevel").arg("warning");
+    // HW decode flags go before -i. Encode-only accelerators (e.g.
+    // VideoToolbox at the encoder side without a matching hwaccel)
+    // return an empty slice here and decode falls back to CPU.
+    cmd.args(accel.decode_args());
+    cmd.arg("-ss")
         .arg(format!("{offset_seconds:.3}"))
         .arg("-i")
         .arg(input)
         .arg("-map")
         .arg("0:v:0")
         .arg("-map")
-        .arg("0:a:0?")
-        .arg("-c:v")
-        .arg("libx264")
-        .arg("-preset")
-        .arg("veryfast")
-        .arg("-crf")
-        .arg("23")
-        .arg("-pix_fmt")
-        .arg("yuv420p")
-        .arg("-profile:v")
-        .arg("main")
-        .arg("-c:a")
+        .arg("0:a:0?");
+    cmd.args(accel.encode_args());
+    cmd.arg("-c:a")
         .arg("aac")
         .arg("-ac")
         .arg("2")

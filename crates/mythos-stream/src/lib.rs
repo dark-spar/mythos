@@ -5,8 +5,10 @@
 //! the browser can't handle natively (HEVC, AC-3/DTS audio, MKV
 //! container, etc.) into HLS segments served back through the API.
 
+pub mod hwaccel;
 pub mod transcode;
 
+pub use hwaccel::{HwAccel, resolve as resolve_hwaccel};
 pub use transcode::{
     SEGMENT_DURATION_SECS, SEGMENT_WAIT_TIMEOUT, SessionKey, TranscodeError, TranscodeManager,
     TranscodeSession, build_vod_playlist, parse_segment_filename, wait_for_file,

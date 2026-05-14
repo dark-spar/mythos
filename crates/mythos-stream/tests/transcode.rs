@@ -54,7 +54,7 @@ async fn ensure_session_produces_first_segment() {
     let work_dir = TempDir::new().unwrap();
     let input = make_test_input(input_dir.path());
 
-    let manager = TranscodeManager::new(work_dir.path().to_path_buf());
+    let manager = TranscodeManager::new(work_dir.path().to_path_buf(), mythos_stream::HwAccel::Cpu);
     let session = manager
         .ensure_session_for_segment(key(), &input, 0)
         .await
@@ -69,7 +69,7 @@ async fn same_segment_reuses_existing_session() {
     let work_dir = TempDir::new().unwrap();
     let input = make_test_input(input_dir.path());
     let k = key();
-    let manager = TranscodeManager::new(work_dir.path().to_path_buf());
+    let manager = TranscodeManager::new(work_dir.path().to_path_buf(), mythos_stream::HwAccel::Cpu);
 
     let first = manager
         .ensure_session_for_segment(k.clone(), &input, 0)
@@ -93,7 +93,7 @@ async fn segment_before_session_start_forces_restart() {
     let work_dir = TempDir::new().unwrap();
     let input = make_test_input(input_dir.path());
     let k = key();
-    let manager = TranscodeManager::new(work_dir.path().to_path_buf());
+    let manager = TranscodeManager::new(work_dir.path().to_path_buf(), mythos_stream::HwAccel::Cpu);
 
     let first = manager
         .ensure_session_for_segment(k.clone(), &input, 1)
@@ -119,7 +119,7 @@ async fn local_segment_path_maps_global_index_to_session_local() {
     let input_dir = TempDir::new().unwrap();
     let work_dir = TempDir::new().unwrap();
     let input = make_test_input(input_dir.path());
-    let manager = TranscodeManager::new(work_dir.path().to_path_buf());
+    let manager = TranscodeManager::new(work_dir.path().to_path_buf(), mythos_stream::HwAccel::Cpu);
 
     let session = manager
         .ensure_session_for_segment(key(), &input, 3)
@@ -139,7 +139,7 @@ async fn stop_removes_session_and_cleans_workdir() {
     let work_dir = TempDir::new().unwrap();
     let input = make_test_input(input_dir.path());
     let k = key();
-    let manager = TranscodeManager::new(work_dir.path().to_path_buf());
+    let manager = TranscodeManager::new(work_dir.path().to_path_buf(), mythos_stream::HwAccel::Cpu);
 
     let session = manager
         .ensure_session_for_segment(k.clone(), &input, 0)

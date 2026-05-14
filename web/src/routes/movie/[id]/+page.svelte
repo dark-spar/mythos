@@ -549,36 +549,33 @@
 </svelte:head>
 
 <main class="min-h-screen bg-black pb-12 text-zinc-100">
-	<div class="mx-auto max-w-5xl px-6 pt-12">
-		{#if detail}
-			<a
-				href={resolve(`/library/${detail.movie.library_id}`)}
-				class="text-sm text-zinc-400 underline-offset-2 hover:text-zinc-100 hover:underline"
-			>
-				← Back to library
-			</a>
-		{:else}
+	{#if loading}
+		<div class="mx-auto max-w-5xl px-6 pt-12">
 			<a
 				href={resolve('/')}
 				class="text-sm text-zinc-400 underline-offset-2 hover:text-zinc-100 hover:underline"
 			>
 				← Home
 			</a>
-		{/if}
-	</div>
-
-	{#if loading}
+		</div>
 		<p class="mx-auto mt-8 max-w-5xl px-6 text-zinc-400">Loading…</p>
 	{:else if error}
+		<div class="mx-auto max-w-5xl px-6 pt-12">
+			<a
+				href={resolve('/')}
+				class="text-sm text-zinc-400 underline-offset-2 hover:text-zinc-100 hover:underline"
+			>
+				← Home
+			</a>
+		</div>
 		<p class="mx-auto mt-8 max-w-5xl px-6 font-mono text-rose-400">{error}</p>
 	{:else if detail}
 		<!--
-			The player breaks out of the narrow content column. `w-full`
-			fills the viewport; `max-h-[85vh]` keeps the frame on-screen
-			at typical desktop aspect ratios without scrolling. `mx-auto`
-			centers when the viewport is wider than 85vh × 16/9.
+			The player sits at the top of the page so playback starts
+			above the fold. The back link and metadata follow inside
+			the narrow content column.
 		-->
-		<section class="mt-4 overflow-hidden bg-black">
+		<section class="overflow-hidden bg-black">
 			<!--
 				Text subtitle tracks render here via <track>. Image subs
 				(PGS/VOBSUB) are burned into the transcode by the server
@@ -609,7 +606,13 @@
 				Your browser can't play this file directly.
 			</video>
 		</section>
-		<div class="mx-auto max-w-5xl px-6">
+		<div class="mx-auto max-w-5xl px-6 pt-6">
+			<a
+				href={resolve(`/library/${detail.movie.library_id}`)}
+				class="text-sm text-zinc-400 underline-offset-2 hover:text-zinc-100 hover:underline"
+			>
+				← Back to library
+			</a>
 			{#if detail.subtitles.length > 0}
 				<div class="mt-3 flex items-center gap-2 text-sm">
 					<label for="subtitle-select" class="text-zinc-400">Subtitles</label>

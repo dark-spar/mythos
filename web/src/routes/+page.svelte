@@ -3,16 +3,26 @@
 	import { resolve } from '$app/paths';
 	import { auth } from '$lib/auth.svelte';
 	import { listLibraries, type Library } from '$lib/libraries';
+	import {
+		listContinueWatching,
+		primaryTitle,
+		progressFraction,
+		subtitleText,
+		type ContinueWatchingItem
+	} from '$lib/continue-watching';
 
 	let libraries = $state<Library[]>([]);
+	let continueWatching = $state<ContinueWatchingItem[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 
 	onMount(async () => {
 		try {
-			libraries = await listLibraries();
+			const [libs, cw] = await Promise.all([listLibraries(), listContinueWatching(24)]);
+			libraries = libs;
+			continueWatching = cw;
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'failed to load libraries';
+			error = e instanceof Error ? e.message : 'failed to load home';
 		} finally {
 			loading = false;
 		}
@@ -57,6 +67,58 @@
 			</div>
 		{/if}
 	</header>
+
+	{#if !loading && continueWatching.length > 0}
+		<section class="mt-12">
+			<h2 class="text-sm font-medium tracking-wide text-zinc-500 uppercase">Continue watching</h2>
+			<ul class="mt-4 flex gap-4 overflow-x-auto pb-2 sm:gap-5">
+				{#each continueWatching as item (item.kind + ':' + item.id)}
+					{@const frac = progressFraction(item)}
+					<li class="w-36 shrink-0 sm:w-40">
+						<a
+							href={item.kind === 'movie'
+								? resolve(`/movie/${item.id}`)
+								: resolve(`/episodes/${item.id}`)}
+							class="block transition hover:opacity-80"
+							aria-label={`Resume ${primaryTitle(item)}`}
+						>
+							<div
+								class="relative aspect-[2/3] w-full overflow-hidden rounded bg-zinc-100 dark:bg-zinc-900"
+							>
+								{#if item.poster_url}
+									<img
+										src={item.poster_url}
+										alt=""
+										loading="lazy"
+										class="h-full w-full object-cover"
+									/>
+								{:else}
+									<div
+										class="flex h-full w-full items-center justify-center p-3 text-center text-xs text-zinc-400"
+									>
+										<span class="line-clamp-3 font-medium">{primaryTitle(item)}</span>
+									</div>
+								{/if}
+								<!-- progress bar at the bottom of the poster -->
+								<div class="absolute inset-x-0 bottom-0 h-1 bg-black/30">
+									<div class="h-full bg-rose-500" style="width: {(frac * 100).toFixed(1)}%"></div>
+								</div>
+							</div>
+							<p
+								class="mt-2 truncate text-sm font-medium text-zinc-900 dark:text-zinc-100"
+								title={primaryTitle(item)}
+							>
+								{primaryTitle(item)}
+							</p>
+							<p class="truncate text-xs text-zinc-500" title={subtitleText(item)}>
+								{subtitleText(item)}
+							</p>
+						</a>
+					</li>
+				{/each}
+			</ul>
+		</section>
+	{/if}
 
 	<section class="mt-12">
 		<h2 class="text-sm font-medium tracking-wide text-zinc-500 uppercase">Your libraries</h2>

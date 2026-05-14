@@ -1,5 +1,6 @@
 //! HTTP API surface.
 
+pub mod activity;
 pub mod auth;
 pub mod error;
 pub mod hls;
@@ -124,6 +125,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/users/me", get(auth::me))
+        .route(
+            "/api/users/me/continue-watching",
+            get(activity::continue_watching),
+        )
         .route("/api/libraries", get(library::list).post(library::create))
         .route(
             "/api/libraries/{id}",

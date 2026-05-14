@@ -1,5 +1,6 @@
 //! Database access layer: connection pool, migrations, and query helpers.
 
+pub mod activity;
 pub mod episode;
 pub mod episode_progress;
 pub mod library;
@@ -11,6 +12,7 @@ pub mod series;
 pub mod settings;
 pub mod subtitle;
 
+pub use activity::ActivityRepo;
 pub use episode::EpisodeRepo;
 pub use episode_progress::EpisodeProgressRepo;
 pub use library::LibraryRepo;

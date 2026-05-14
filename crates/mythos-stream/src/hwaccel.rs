@@ -145,6 +145,12 @@ impl HwAccel {
     /// GPU. The output of this filter must accept the encoder's input
     /// format (NV12 for VAAPI; yuv420p for libx264).
     ///
+    /// The 8-bit `yuv420p` tail on the CPU/QSV/NVENC/VideoToolbox path
+    /// forces a 10→8 downconvert when the source is 10-bit (HEVC
+    /// Main10 etc). H.264 hardware encoders don't accept
+    /// `yuv420p10le`; without this `h264_nvenc` errors with
+    /// "10 bit encode not supported / No capable devices found".
+    ///
     /// Width is `-2` (auto from source aspect, snapped to an even
     /// number) so non-16:9 prints (Cinerama 2.20:1, IMAX 1.43:1,
     /// Academy 1.37:1, …) don't get horizontally squeezed into our
@@ -156,7 +162,7 @@ impl HwAccel {
         match self {
             HwAccel::Vaapi => format!("scale_vaapi=w=-2:h={}:format=nv12", rendition.height),
             HwAccel::Cpu | HwAccel::Qsv | HwAccel::Nvenc | HwAccel::VideoToolbox => {
-                format!("scale=w=-2:h={}", rendition.height)
+                format!("scale=w=-2:h={},format=yuv420p", rendition.height)
             }
         }
     }

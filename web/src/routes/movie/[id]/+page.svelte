@@ -90,12 +90,14 @@
 		usingHls = true;
 		const playlistUrl = `/api/movies/${d.movie.id}/hls/master.m3u8`;
 
-		if (el.canPlayType('application/vnd.apple.mpegurl')) {
-			// Safari has native HLS support — let it do its thing.
-			el.src = playlistUrl;
-			return;
-		}
-
+		// Prefer hls.js whenever MSE is available. Some browsers
+		// (Firefox on Android in particular) return non-empty
+		// `canPlayType('application/vnd.apple.mpegurl')` even though
+		// they can't actually decode an HLS manifest natively — letting
+		// that branch win sends the .m3u8 to <video> directly, which
+		// then errors with "no video with supported format and mime
+		// type found". Native HLS is only the right answer on
+		// Safari/iOS builds where MSE is unavailable.
 		if (Hls.isSupported()) {
 			hls = new Hls({
 				enableWorker: true,
@@ -117,6 +119,12 @@
 			});
 			hls.loadSource(playlistUrl);
 			hls.attachMedia(el);
+			return;
+		}
+
+		if (el.canPlayType('application/vnd.apple.mpegurl')) {
+			// Safari iOS without MSE — fall back to the native player.
+			el.src = playlistUrl;
 			return;
 		}
 

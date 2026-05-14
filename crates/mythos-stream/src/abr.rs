@@ -30,11 +30,24 @@ impl Rendition {
         (self.video_bitrate_kbps + self.audio_bitrate_kbps) * 1100
     }
 
-    /// Conservative codec string for H.264 Main + AAC-LC. Real codec
-    /// strings would encode the AVC level too, but most player ABR
-    /// logic only cares about the profile name.
+    /// Codec string for H.264 Main + AAC-LC, with the AVC level
+    /// scaled to the rendition's resolution. MSE-based players
+    /// (hls.js + Firefox/Chrome) check whether the decoder advertises
+    /// support for the level in the codec string before creating a
+    /// SourceBuffer; advertising 3.1 for every variant would falsely
+    /// imply 720p-max, and some implementations reject the buffer
+    /// when the actual stream exceeds that level.
+    ///
+    /// Levels:
+    /// - 3.0 (`1e`): up to 720×480@30fps
+    /// - 3.1 (`1f`): up to 1280×720@30fps
+    /// - 4.0 (`28`): up to 1920×1080@30fps
     pub fn codecs_attr(&self) -> &'static str {
-        "avc1.4d401f,mp4a.40.2"
+        match self.height {
+            h if h <= 480 => "avc1.4d401e,mp4a.40.2",
+            h if h <= 720 => "avc1.4d401f,mp4a.40.2",
+            _ => "avc1.4d4028,mp4a.40.2",
+        }
     }
 }
 

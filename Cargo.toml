@@ -16,7 +16,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
-repository = "https://github.com/mattmoore/mythos"
+repository = "https://gitlab.com/darkspar/mythos"
 
 [workspace.dependencies]
 mythos-core = { path = "crates/mythos-core" }

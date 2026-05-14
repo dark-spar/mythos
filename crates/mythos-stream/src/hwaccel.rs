@@ -29,6 +29,8 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
+use crate::abr::Rendition;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HwAccel {
     Nvenc,
@@ -86,10 +88,10 @@ impl HwAccel {
         }
     }
 
-    /// Encoder-specific quality / preset flags + any video filter
-    /// needed to feed frames into the encoder. Returned as a
-    /// `Vec<String>` because some flags carry numeric values; the
-    /// caller `cmd.args(...)`-es them.
+    /// Single-rendition encode args used only by the smoke test, where
+    /// we just need any working encode to verify the GPU + driver
+    /// chain. Production transcoding uses
+    /// [`Self::abr_video_encoder_args`] with per-variant bitrate flags.
     pub fn encode_args(self) -> Vec<String> {
         match self {
             HwAccel::Cpu => vec![
@@ -113,13 +115,6 @@ impl HwAccel {
                 "23".into(),
             ],
             HwAccel::Vaapi => vec![
-                // Decode runs on the GPU (see decode_args) so frames
-                // arrive as VAAPI surfaces, possibly in P010 (10-bit
-                // HEVC source). `scale_vaapi=format=nv12` does the
-                // 10→8-bit conversion on the GPU before handing
-                // frames to h264_vaapi, which only encodes 8-bit AVC.
-                // Without this filter, mainline VAAPI rejects with
-                // "No usable encoding profile found".
                 "-vf".into(),
                 "scale_vaapi=format=nv12".into(),
                 "-c:v".into(),
@@ -142,6 +137,72 @@ impl HwAccel {
                 "50".into(),
             ],
         }
+    }
+
+    /// Per-rendition scale filter, applied inside the
+    /// `-filter_complex` graph after a `split` fan-out. CPU uses
+    /// `scale`; VAAPI uses `scale_vaapi` so the resize happens on the
+    /// GPU. The output of this filter must accept the encoder's input
+    /// format (NV12 for VAAPI; yuv420p for libx264).
+    ///
+    /// Width is `-2` (auto from source aspect, snapped to an even
+    /// number) so non-16:9 prints (Cinerama 2.20:1, IMAX 1.43:1,
+    /// Academy 1.37:1, …) don't get horizontally squeezed into our
+    /// nominal 16:9 box. The actual output width depends on the
+    /// source's display aspect ratio, which is what the player should
+    /// render at; height is the dimension we actually want to pin per
+    /// rendition.
+    pub fn scale_filter(self, rendition: &Rendition) -> String {
+        match self {
+            HwAccel::Vaapi => format!("scale_vaapi=w=-2:h={}:format=nv12", rendition.height),
+            HwAccel::Cpu | HwAccel::Qsv | HwAccel::Nvenc | HwAccel::VideoToolbox => {
+                format!("scale=w=-2:h={}", rendition.height)
+            }
+        }
+    }
+
+    /// Per-variant video encoder args, indexed by output position so
+    /// `-c:v:N`/`-b:v:N`/etc. apply to the right output stream.
+    pub fn abr_video_encoder_args(self, output_index: usize, rendition: &Rendition) -> Vec<String> {
+        let kbps = rendition.video_bitrate_kbps;
+        // Standard VBV bracket: target bitrate, maxrate ~10% above,
+        // bufsize = 2× target. Keeps the encoder honest about
+        // bitrate without locking it to CBR.
+        let maxrate = (kbps * 110) / 100;
+        let bufsize = kbps * 2;
+
+        let mut args = vec![
+            format!("-c:v:{output_index}"),
+            self.h264_encoder().into(),
+            format!("-b:v:{output_index}"),
+            format!("{kbps}k"),
+            format!("-maxrate:v:{output_index}"),
+            format!("{maxrate}k"),
+            format!("-bufsize:v:{output_index}"),
+            format!("{bufsize}k"),
+        ];
+
+        match self {
+            HwAccel::Cpu => {
+                args.extend([
+                    format!("-preset:v:{output_index}"),
+                    "veryfast".into(),
+                    format!("-profile:v:{output_index}"),
+                    "main".into(),
+                    format!("-pix_fmt:v:{output_index}"),
+                    "yuv420p".into(),
+                ]);
+            }
+            HwAccel::Qsv => {
+                args.extend([format!("-preset:v:{output_index}"), "veryfast".into()]);
+            }
+            HwAccel::Nvenc => {
+                args.extend([format!("-preset:v:{output_index}"), "p4".into()]);
+            }
+            HwAccel::Vaapi | HwAccel::VideoToolbox => {}
+        }
+
+        args
     }
 }
 

@@ -157,18 +157,16 @@ fn build_app(
         // booting" — override the on_failure callback so 503 stays
         // quiet at the trace layer (the handler-level log will say
         // what's going on at DEBUG if you want it).
-        .layer(
-            TraceLayer::new_for_http().on_failure(
-                |class: ServerErrorsFailureClass, _latency: std::time::Duration, _span: &Span| {
-                    if let ServerErrorsFailureClass::StatusCode(status) = class
-                        && status.as_u16() == 503
-                    {
-                        return;
-                    }
-                    tracing::error!(classification = ?class, "response failed");
-                },
-            ),
-        )
+        .layer(TraceLayer::new_for_http().on_failure(
+            |class: ServerErrorsFailureClass, _latency: std::time::Duration, _span: &Span| {
+                if let ServerErrorsFailureClass::StatusCode(status) = class
+                    && status.as_u16() == 503
+                {
+                    return;
+                }
+                tracing::error!(classification = ?class, "response failed");
+            },
+        ))
 }
 
 fn init_tracing(filter: &str) {

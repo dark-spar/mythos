@@ -13,6 +13,9 @@ use uuid::Uuid;
 
 fn make_test_input(dir: &std::path::Path) -> PathBuf {
     let path = dir.join("input.mp4");
+    // Synthetic video + silent audio — the ABR transcoder's
+    // var_stream_map references audio for each rendition, so a
+    // video-only input would fail to mux.
     let status = Command::new("ffmpeg")
         .args([
             "-y",
@@ -22,10 +25,17 @@ fn make_test_input(dir: &std::path::Path) -> PathBuf {
             "lavfi",
             "-i",
             "color=red:size=160x90:duration=10:rate=10",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=48000",
+            "-shortest",
             "-c:v",
             "libx264",
             "-pix_fmt",
             "yuv420p",
+            "-c:a",
+            "aac",
         ])
         .arg(&path)
         .status()
@@ -42,8 +52,12 @@ fn key() -> SessionKey {
 }
 
 async fn await_segment_zero(session: &mythos_stream::TranscodeSession) {
-    let path = session.local_segment_path(session.start_segment).unwrap();
-    wait_for_file(&path, Duration::from_secs(10))
+    let path = session
+        .local_segment_path("480p", session.start_segment)
+        .unwrap();
+    // Three-rendition ABR with libx264 needs ~10–20s on slow CI; give it
+    // headroom so flake isn't masquerading as a real regression.
+    wait_for_file(&path, Duration::from_secs(45))
         .await
         .expect("first segment should appear within timeout");
 }
@@ -56,7 +70,7 @@ async fn ensure_session_produces_first_segment() {
 
     let manager = TranscodeManager::new(work_dir.path().to_path_buf(), mythos_stream::HwAccel::Cpu);
     let session = manager
-        .ensure_session_for_segment(key(), &input, 0)
+        .ensure_session_for_segment(key(), &input, "480p", 0)
         .await
         .expect("ensure_session_for_segment");
     assert_eq!(session.start_segment, 0);
@@ -72,11 +86,11 @@ async fn same_segment_reuses_existing_session() {
     let manager = TranscodeManager::new(work_dir.path().to_path_buf(), mythos_stream::HwAccel::Cpu);
 
     let first = manager
-        .ensure_session_for_segment(k.clone(), &input, 0)
+        .ensure_session_for_segment(k.clone(), &input, "480p", 0)
         .await
         .unwrap();
     let second = manager
-        .ensure_session_for_segment(k.clone(), &input, 0)
+        .ensure_session_for_segment(k.clone(), &input, "480p", 0)
         .await
         .unwrap();
 
@@ -96,7 +110,7 @@ async fn segment_before_session_start_forces_restart() {
     let manager = TranscodeManager::new(work_dir.path().to_path_buf(), mythos_stream::HwAccel::Cpu);
 
     let first = manager
-        .ensure_session_for_segment(k.clone(), &input, 1)
+        .ensure_session_for_segment(k.clone(), &input, "480p", 1)
         .await
         .unwrap();
     let first_started = first.started_at;
@@ -105,7 +119,7 @@ async fn segment_before_session_start_forces_restart() {
     // Inside the startup grace period, an incompatible request errors
     // rather than killing the in-flight session.
     match manager
-        .ensure_session_for_segment(k.clone(), &input, 0)
+        .ensure_session_for_segment(k.clone(), &input, "480p", 0)
         .await
     {
         Err(mythos_stream::TranscodeError::SessionStillBooting) => {}
@@ -117,7 +131,7 @@ async fn segment_before_session_start_forces_restart() {
     // does restart cleanly.
     tokio::time::sleep(std::time::Duration::from_secs(4)).await;
     let second = manager
-        .ensure_session_for_segment(k, &input, 0)
+        .ensure_session_for_segment(k, &input, "480p", 0)
         .await
         .unwrap();
     assert!(
@@ -135,15 +149,15 @@ async fn local_segment_path_maps_global_index_to_session_local() {
     let manager = TranscodeManager::new(work_dir.path().to_path_buf(), mythos_stream::HwAccel::Cpu);
 
     let session = manager
-        .ensure_session_for_segment(key(), &input, 3)
+        .ensure_session_for_segment(key(), &input, "480p", 3)
         .await
         .unwrap();
     // Session started at global seg 3 — global 3 is seg-0.ts on disk.
-    let p0 = session.local_segment_path(3).unwrap();
+    let p0 = session.local_segment_path("480p", 3).unwrap();
     assert!(p0.ends_with("seg-0.ts"));
-    let p1 = session.local_segment_path(4).unwrap();
+    let p1 = session.local_segment_path("480p", 4).unwrap();
     assert!(p1.ends_with("seg-1.ts"));
-    assert!(session.local_segment_path(2).is_err());
+    assert!(session.local_segment_path("480p", 2).is_err());
 }
 
 #[tokio::test]
@@ -155,7 +169,7 @@ async fn stop_removes_session_and_cleans_workdir() {
     let manager = TranscodeManager::new(work_dir.path().to_path_buf(), mythos_stream::HwAccel::Cpu);
 
     let session = manager
-        .ensure_session_for_segment(k.clone(), &input, 0)
+        .ensure_session_for_segment(k.clone(), &input, "480p", 0)
         .await
         .unwrap();
     let session_workdir = session.work_dir.clone();

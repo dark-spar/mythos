@@ -34,6 +34,7 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info};
 use uuid::Uuid;
 
+use crate::abr::{ABR_LADDER, Rendition, is_known_variant};
 use crate::hwaccel::HwAccel;
 
 /// Target HLS segment duration in seconds. Anything that builds the
@@ -77,6 +78,8 @@ pub enum TranscodeError {
     Timeout,
     #[error("invalid filename for segment: {0}")]
     InvalidFilename(String),
+    #[error("unknown ABR variant: {0}")]
+    InvalidVariant(String),
     #[error("requested segment {requested} is before the session start ({session_start})")]
     BeforeSessionStart { requested: u32, session_start: u32 },
     #[error("a session was just started for this key; try again shortly")]
@@ -100,11 +103,18 @@ pub struct TranscodeSession {
 }
 
 impl TranscodeSession {
-    /// Filesystem path for the global segment `seg_idx`. Returns
-    /// `BeforeSessionStart` if the requested segment predates the
-    /// session — the caller is expected to restart the session in that
-    /// case rather than reaching for a negative local index.
-    pub fn local_segment_path(&self, seg_idx: u32) -> Result<PathBuf, TranscodeError> {
+    /// Filesystem path for the global segment `seg_idx` within the
+    /// named variant. Returns `BeforeSessionStart` if the requested
+    /// segment predates the session (caller should restart), or
+    /// `InvalidVariant` for an unknown variant name.
+    pub fn local_segment_path(
+        &self,
+        variant: &str,
+        seg_idx: u32,
+    ) -> Result<PathBuf, TranscodeError> {
+        if !is_known_variant(variant) {
+            return Err(TranscodeError::InvalidVariant(variant.to_string()));
+        }
         if seg_idx < self.start_segment {
             return Err(TranscodeError::BeforeSessionStart {
                 requested: seg_idx,
@@ -112,14 +122,33 @@ impl TranscodeSession {
             });
         }
         let local = seg_idx - self.start_segment;
-        Ok(self.work_dir.join(format!("seg-{local}.ts")))
+        Ok(self.work_dir.join(variant).join(format!("seg-{local}.ts")))
     }
 
-    /// Highest global segment index this session has produced so far,
-    /// or `None` if it hasn't produced anything yet.
-    pub async fn frontier(&self) -> Option<u32> {
+    /// Filesystem path for the variant-specific playlist ffmpeg writes
+    /// alongside the segments. Not currently served to clients — the
+    /// SPA gets a synthetic playlist via [`build_variant_playlist`] —
+    /// but useful for diagnostics.
+    pub fn variant_playlist_path(&self, variant: &str) -> Result<PathBuf, TranscodeError> {
+        if !is_known_variant(variant) {
+            return Err(TranscodeError::InvalidVariant(variant.to_string()));
+        }
+        Ok(self.work_dir.join(variant).join("playlist.m3u8"))
+    }
+
+    /// Highest global segment index produced for `variant`, or `None`
+    /// if the variant hasn't written its first segment yet. All
+    /// renditions are encoded in lockstep by a single ffmpeg, so any
+    /// variant's frontier approximates the session's overall
+    /// progress; we read the specific variant being asked about to
+    /// avoid races on subdirs that haven't been created yet.
+    pub async fn frontier(&self, variant: &str) -> Option<u32> {
+        if !is_known_variant(variant) {
+            return None;
+        }
+        let dir = self.work_dir.join(variant);
         let mut max_local: Option<u32> = None;
-        let mut entries = match tokio::fs::read_dir(&self.work_dir).await {
+        let mut entries = match tokio::fs::read_dir(&dir).await {
             Ok(e) => e,
             Err(_) => return None,
         };
@@ -191,15 +220,19 @@ impl TranscodeManager {
         &self,
         key: SessionKey,
         input_path: &Path,
+        variant: &str,
         seg_idx: u32,
     ) -> Result<Arc<TranscodeSession>, TranscodeError> {
+        if !is_known_variant(variant) {
+            return Err(TranscodeError::InvalidVariant(variant.to_string()));
+        }
         // Fast path: existing session covers this segment.
         let needs_restart = {
             let sessions = self.inner.sessions.read().await;
             match sessions.get(&key) {
                 Some(existing) if seg_idx >= existing.start_segment => {
                     existing.touch().await;
-                    let frontier = existing.frontier().await;
+                    let frontier = existing.frontier(variant).await;
                     let too_far_ahead = match frontier {
                         Some(f) => seg_idx > f + MAX_AHEAD_SEGMENTS,
                         // No segments yet — only restart if the player
@@ -259,6 +292,11 @@ impl TranscodeManager {
             .join(key.user_id.to_string())
             .join(key.movie_id.to_string());
         tokio::fs::create_dir_all(&work_dir).await?;
+        // ffmpeg's HLS muxer doesn't auto-create per-variant subdirs
+        // when `%v` is in `-hls_segment_filename`; pre-create them.
+        for rendition in ABR_LADDER {
+            tokio::fs::create_dir_all(work_dir.join(rendition.name)).await?;
+        }
 
         let offset_seconds = f64::from(seg_idx) * SEGMENT_DURATION_SECS;
         info!(
@@ -267,6 +305,7 @@ impl TranscodeManager {
             seg_idx,
             offset_seconds,
             encoder = self.inner.accel.h264_encoder(),
+            renditions = ABR_LADDER.len(),
             "starting ffmpeg transcode session"
         );
 
@@ -355,56 +394,62 @@ async fn launch_ffmpeg(
     offset_seconds: f64,
     accel: HwAccel,
 ) -> std::io::Result<Child> {
-    let playlist = work_dir.join("playlist.m3u8");
-    let segment_pattern = work_dir.join("seg-%d.ts");
+    // Per-variant subdirs are pre-created by the caller. ffmpeg
+    // expands `%v` in `-hls_segment_filename` and the output URL to
+    // the variant name set in `-var_stream_map`.
+    let segment_pattern = work_dir.join("%v").join("seg-%d.ts");
+    let variant_playlist_pattern = work_dir.join("%v").join("playlist.m3u8");
 
-    // -ss before -i is fast (uses container index, may be slightly
-    // imprecise). For HLS the segment boundary doesn't have to be
-    // frame-exact — the player adjusts. Fast seek keeps startup
-    // latency low.
     let mut cmd = Command::new("ffmpeg");
     cmd.arg("-hide_banner").arg("-loglevel").arg("warning");
-    // HW decode flags go before -i. Encode-only accelerators (e.g.
-    // VideoToolbox at the encoder side without a matching hwaccel)
-    // return an empty slice here and decode falls back to CPU.
     cmd.args(accel.decode_args());
     cmd.arg("-ss")
         .arg(format!("{offset_seconds:.3}"))
         .arg("-accurate_seek")
         .arg("-i")
-        .arg(input)
-        .arg("-map")
-        .arg("0:v:0")
-        .arg("-map")
-        .arg("0:a:0?")
-        // -copyts (+ muxdelay/muxpreload 0) preserves the source's
-        // wall-clock PTS through the encoder, so segment N really
-        // starts at N * SEGMENT_DURATION_SECS in the player's
-        // timeline rather than at PTS 0. Without this, hls.js sees
-        // segments whose internal PTS resets to 0 each session and
-        // gradually decides the movie is shorter than it actually
-        // is — which is exactly the "timeline shrinks, skip to end"
-        // failure mode after a seek triggers a session restart.
-        .arg("-copyts")
+        .arg(input);
+
+    // Single decode → split N ways → per-rendition scale. With VAAPI
+    // the split + scale all happen on the GPU; with libx264 they all
+    // happen on the CPU. Either way, one decode pass.
+    cmd.arg("-filter_complex").arg(build_filter_complex(accel));
+
+    // Map: each rendition gets the corresponding scaled video output
+    // [vN] + a copy of the source audio.
+    for i in 0..ABR_LADDER.len() {
+        cmd.arg("-map").arg(format!("[v{i}]"));
+        cmd.arg("-map").arg("0:a:0?");
+    }
+
+    // Per-rendition video encoder args (codec, bitrate target,
+    // maxrate, bufsize, preset where applicable).
+    for (i, rendition) in ABR_LADDER.iter().enumerate() {
+        cmd.args(accel.abr_video_encoder_args(i, rendition));
+    }
+
+    // Audio: AAC stereo, per-variant bitrate.
+    cmd.arg("-c:a").arg("aac").arg("-ac").arg("2");
+    for (i, rendition) in ABR_LADDER.iter().enumerate() {
+        cmd.arg(format!("-b:a:{i}"))
+            .arg(format!("{}k", rendition.audio_bitrate_kbps));
+    }
+
+    // PTS preservation + segment-boundary keyframes (see Phase 4
+    // commentary in git history for why each of these matters).
+    cmd.arg("-copyts")
         .arg("-muxdelay")
         .arg("0")
         .arg("-muxpreload")
         .arg("0")
-        // Force keyframes at every segment boundary on the *encoder*
-        // side so each segment is independently decodable regardless
-        // of the source's keyframe layout. (independent_segments on
-        // the HLS muxer alone isn't enough when the source's GOPs
-        // don't align to our 6s grid.)
         .arg("-force_key_frames")
         .arg(format!("expr:gte(t,n_forced*{SEGMENT_DURATION_SECS})"));
-    cmd.args(accel.encode_args());
-    cmd.arg("-c:a")
-        .arg("aac")
-        .arg("-ac")
-        .arg("2")
-        .arg("-b:a")
-        .arg("128k")
-        .arg("-f")
+
+    // HLS muxer: write the per-variant playlists into `%v/playlist.m3u8`
+    // and segments into `%v/seg-%d.ts`. We don't actually serve the
+    // master that ffmpeg writes; the API builds a synthetic one. But
+    // ffmpeg still needs `-master_pl_name` set to opt into the
+    // var_stream_map mode.
+    cmd.arg("-f")
         .arg("hls")
         .arg("-hls_time")
         .arg(format!("{SEGMENT_DURATION_SECS}"))
@@ -412,20 +457,19 @@ async fn launch_ffmpeg(
         .arg("0")
         .arg("-hls_flags")
         .arg("independent_segments")
+        .arg("-var_stream_map")
+        .arg(build_var_stream_map())
+        .arg("-master_pl_name")
+        .arg("master.m3u8")
         .arg("-hls_segment_filename")
         .arg(&segment_pattern)
-        .arg(&playlist)
+        .arg(&variant_playlist_pattern)
         .kill_on_drop(true)
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
 
     let mut child = cmd.spawn()?;
     if let Some(stderr) = child.stderr.take() {
-        // ffmpeg's stderr at -loglevel warning is mostly informational
-        // ("Consider increasing analyzeduration…" and similar). Real
-        // failures surface as a non-zero exit or as our segment-wait
-        // timeout, not as a specific stderr line — log at info so
-        // these don't look like actionable problems.
         tokio::spawn(async move {
             let mut reader = tokio::io::BufReader::new(stderr).lines();
             while let Ok(Some(line)) = reader.next_line().await {
@@ -436,6 +480,35 @@ async fn launch_ffmpeg(
     Ok(child)
 }
 
+/// Construct the `-filter_complex` argument that splits the decoded
+/// video stream N ways and scales each branch to one rendition.
+fn build_filter_complex(accel: HwAccel) -> String {
+    let n = ABR_LADDER.len();
+
+    // [0:v]split=3[s0][s1][s2]
+    let split_labels: String = (0..n).map(|i| format!("[s{i}]")).collect();
+    let mut graph = format!("[0:v]split={n}{split_labels}");
+
+    // ; [s0]scale=...[v0]; [s1]scale=...[v1]; ...
+    for (i, rendition) in ABR_LADDER.iter().enumerate() {
+        graph.push(';');
+        graph.push_str(&format!("[s{i}]{}[v{i}]", accel.scale_filter(rendition)));
+    }
+    graph
+}
+
+/// `-var_stream_map` value: pairs output indices to variant names.
+/// With 3 video outputs and 3 audio outputs, video stream `i` and
+/// audio stream `i` belong to variant `ABR_LADDER[i].name`.
+fn build_var_stream_map() -> String {
+    ABR_LADDER
+        .iter()
+        .enumerate()
+        .map(|(i, r)| format!("v:{i},a:{i},name:{}", r.name))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Parse `seg-N.ts` into `N`. Anything else (including
 /// `playlist.m3u8`) returns `None`.
 pub fn parse_segment_filename(name: &str) -> Option<u32> {
@@ -443,10 +516,36 @@ pub fn parse_segment_filename(name: &str) -> Option<u32> {
     rest.parse::<u32>().ok()
 }
 
-/// Build a static VOD playlist describing every segment up to
-/// `total_duration_seconds`. The last segment may be shorter than
-/// [`SEGMENT_DURATION_SECS`] to absorb the leftover.
-pub fn build_vod_playlist(total_duration_seconds: f64) -> String {
+/// Synthetic ABR master playlist. Lists every rendition in
+/// [`ABR_LADDER`] with its declared bandwidth + resolution +
+/// codecs hint. Relative URLs point at `:variant/playlist.m3u8`
+/// served by the API; the player fetches whichever it picks.
+pub fn build_master_playlist() -> String {
+    let mut p = String::new();
+    p.push_str("#EXTM3U\n");
+    p.push_str("#EXT-X-VERSION:6\n");
+    p.push_str("#EXT-X-INDEPENDENT-SEGMENTS\n");
+    for r in ABR_LADDER {
+        p.push_str(&format!(
+            "#EXT-X-STREAM-INF:BANDWIDTH={},RESOLUTION={}x{},CODECS=\"{}\"\n",
+            r.declared_bandwidth_bps(),
+            r.width,
+            r.height,
+            r.codecs_attr()
+        ));
+        p.push_str(&format!("{}/playlist.m3u8\n", r.name));
+    }
+    p
+}
+
+/// Synthetic per-variant media playlist describing every segment up
+/// to `total_duration_seconds`. The last segment may be shorter than
+/// [`SEGMENT_DURATION_SECS`] to absorb the leftover. Segment URLs are
+/// `seg-N.ts` relative to the playlist itself (which is served at
+/// `:variant/playlist.m3u8`).
+pub fn build_variant_playlist(total_duration_seconds: f64, variant: &Rendition) -> String {
+    let _ = variant; // signature reserves room for per-variant
+    // bitrate metadata once we want it
     let total = total_duration_seconds.max(0.0);
     if total <= 0.0 {
         return "#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-ENDLIST\n".to_string();
@@ -495,8 +594,8 @@ mod tests {
     }
 
     #[test]
-    fn vod_playlist_lists_every_segment_with_correct_durations() {
-        let p = build_vod_playlist(13.0); // 6 + 6 + 1
+    fn variant_playlist_lists_every_segment_with_correct_durations() {
+        let p = build_variant_playlist(13.0, &ABR_LADDER[0]); // 6 + 6 + 1
         assert!(p.contains("seg-0.ts"));
         assert!(p.contains("seg-1.ts"));
         assert!(p.contains("seg-2.ts"));
@@ -507,17 +606,28 @@ mod tests {
     }
 
     #[test]
-    fn vod_playlist_with_exact_multiple_has_no_short_tail() {
-        let p = build_vod_playlist(12.0);
+    fn variant_playlist_with_exact_multiple_has_no_short_tail() {
+        let p = build_variant_playlist(12.0, &ABR_LADDER[0]);
         assert!(p.contains("seg-0.ts"));
         assert!(p.contains("seg-1.ts"));
         assert!(!p.contains("seg-2.ts"));
     }
 
     #[test]
-    fn vod_playlist_with_zero_duration_is_empty() {
-        let p = build_vod_playlist(0.0);
+    fn variant_playlist_with_zero_duration_is_empty() {
+        let p = build_variant_playlist(0.0, &ABR_LADDER[0]);
         assert!(!p.contains("seg-"));
         assert!(p.contains("#EXT-X-ENDLIST"));
+    }
+
+    #[test]
+    fn master_playlist_lists_every_rendition() {
+        let p = build_master_playlist();
+        for rendition in ABR_LADDER {
+            assert!(p.contains(rendition.name));
+            assert!(p.contains(&format!("{}x{}", rendition.width, rendition.height)));
+        }
+        assert!(p.contains("#EXT-X-STREAM-INF"));
+        assert!(p.contains("CODECS="));
     }
 }

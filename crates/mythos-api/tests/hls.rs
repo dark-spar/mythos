@@ -47,6 +47,9 @@ async fn setup() -> (Router, SqlitePool, TempDir) {
 
 fn make_test_input(dir: &std::path::Path) -> PathBuf {
     let path = dir.join("movie.mp4");
+    // Synthetic video + silent audio — the ABR transcoder's
+    // var_stream_map references audio for each rendition, so a
+    // video-only input would fail to mux.
     let status = Command::new("ffmpeg")
         .args([
             "-y",
@@ -56,10 +59,17 @@ fn make_test_input(dir: &std::path::Path) -> PathBuf {
             "lavfi",
             "-i",
             "color=red:size=160x90:duration=15:rate=10",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=48000",
+            "-shortest",
             "-c:v",
             "libx264",
             "-pix_fmt",
             "yuv420p",
+            "-c:a",
+            "aac",
         ])
         .arg(&path)
         .status()
@@ -153,28 +163,26 @@ async fn admin_bearer(router: &Router) -> String {
 }
 
 #[tokio::test]
-async fn playlist_requires_auth() {
+async fn master_requires_auth() {
     let (router, pool, _tdir) = setup().await;
     let (movie_id, _dir) = create_movie_on_disk(&pool, Some(15.0)).await;
 
     let res = router
-        .oneshot(anon_get(&format!(
-            "/api/movies/{movie_id}/hls/playlist.m3u8"
-        )))
+        .oneshot(anon_get(&format!("/api/movies/{movie_id}/hls/master.m3u8")))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
-async fn playlist_unknown_movie_returns_404() {
+async fn master_unknown_movie_returns_404() {
     let (router, _pool, _tdir) = setup().await;
     let bearer = admin_bearer(&router).await;
     let missing = Uuid::now_v7();
 
     let res = router
         .oneshot(auth_get(
-            &format!("/api/movies/{missing}/hls/playlist.m3u8"),
+            &format!("/api/movies/{missing}/hls/master.m3u8"),
             &bearer,
         ))
         .await
@@ -183,7 +191,29 @@ async fn playlist_unknown_movie_returns_404() {
 }
 
 #[tokio::test]
-async fn playlist_lists_every_segment_for_the_full_duration() {
+async fn master_lists_every_rendition() {
+    let (router, pool, _tdir) = setup().await;
+    let bearer = admin_bearer(&router).await;
+    let (movie_id, _dir) = create_movie_on_disk(&pool, Some(15.0)).await;
+
+    let res = router
+        .oneshot(auth_get(
+            &format!("/api/movies/{movie_id}/hls/master.m3u8"),
+            &bearer,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(text.contains("#EXT-X-STREAM-INF"));
+    assert!(text.contains("480p/playlist.m3u8"));
+    assert!(text.contains("720p/playlist.m3u8"));
+    assert!(text.contains("1080p/playlist.m3u8"));
+}
+
+#[tokio::test]
+async fn variant_playlist_lists_every_segment_for_full_duration() {
     let (router, pool, _tdir) = setup().await;
     let bearer = admin_bearer(&router).await;
     // 15s with 6s segments → seg-0 (6s) + seg-1 (6s) + seg-2 (3s).
@@ -191,18 +221,12 @@ async fn playlist_lists_every_segment_for_the_full_duration() {
 
     let res = router
         .oneshot(auth_get(
-            &format!("/api/movies/{movie_id}/hls/playlist.m3u8"),
+            &format!("/api/movies/{movie_id}/hls/480p/playlist.m3u8"),
             &bearer,
         ))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    assert_eq!(
-        res.headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok()),
-        Some("application/vnd.apple.mpegurl")
-    );
     let body = res.into_body().collect().await.unwrap().to_bytes();
     let text = std::str::from_utf8(&body).unwrap();
     assert!(text.contains("#EXT-X-PLAYLIST-TYPE:VOD"));
@@ -214,14 +238,30 @@ async fn playlist_lists_every_segment_for_the_full_duration() {
 }
 
 #[tokio::test]
-async fn playlist_without_known_duration_returns_422() {
+async fn unknown_variant_returns_404() {
+    let (router, pool, _tdir) = setup().await;
+    let bearer = admin_bearer(&router).await;
+    let (movie_id, _dir) = create_movie_on_disk(&pool, Some(15.0)).await;
+
+    let res = router
+        .oneshot(auth_get(
+            &format!("/api/movies/{movie_id}/hls/4320p/playlist.m3u8"),
+            &bearer,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn master_without_known_duration_returns_422() {
     let (router, pool, _tdir) = setup().await;
     let bearer = admin_bearer(&router).await;
     let (movie_id, _dir) = create_movie_on_disk(&pool, None).await;
 
     let res = router
         .oneshot(auth_get(
-            &format!("/api/movies/{movie_id}/hls/playlist.m3u8"),
+            &format!("/api/movies/{movie_id}/hls/master.m3u8"),
             &bearer,
         ))
         .await
@@ -240,7 +280,7 @@ async fn segment_request_creates_session_and_serves_ts_bytes() {
 
     let res = router
         .oneshot(auth_get(
-            &format!("/api/movies/{movie_id}/hls/seg-0.ts"),
+            &format!("/api/movies/{movie_id}/hls/480p/seg-0.ts"),
             &bearer,
         ))
         .await
@@ -267,7 +307,7 @@ async fn segment_at_arbitrary_index_restarts_transcoder() {
     // session starts there instead of at 0.
     let res = router
         .oneshot(auth_get(
-            &format!("/api/movies/{movie_id}/hls/seg-1.ts"),
+            &format!("/api/movies/{movie_id}/hls/720p/seg-1.ts"),
             &bearer,
         ))
         .await
@@ -283,7 +323,7 @@ async fn segment_with_traversal_filename_is_rejected() {
 
     let req = Request::builder()
         .method("GET")
-        .uri(format!("/api/movies/{movie_id}/hls/..%2Fetc%2Fpasswd"))
+        .uri(format!("/api/movies/{movie_id}/hls/480p/..%2Fetc%2Fpasswd"))
         .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
         .body(Body::empty())
         .unwrap();

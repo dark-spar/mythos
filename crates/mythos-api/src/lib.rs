@@ -78,11 +78,12 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/movies/{id}", get(movie::get_one))
         .route("/api/movies/{id}/poster", get(movie::poster))
         .route("/api/movies/{id}/stream", get(movie::stream))
-        .route("/api/movies/{id}/hls/{filename}", get(hls::hls))
+        .route("/api/movies/{id}/hls/master.m3u8", get(hls::master))
         .route(
-            "/api/movies/{id}/hls",
-            axum::routing::delete(hls::stop),
+            "/api/movies/{id}/hls/{variant}/{filename}",
+            get(hls::variant_file),
         )
+        .route("/api/movies/{id}/hls", axum::routing::delete(hls::stop))
         .route(
             "/api/movies/{id}/progress",
             axum::routing::put(movie::put_progress),

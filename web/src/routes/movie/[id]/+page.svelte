@@ -82,12 +82,13 @@
 			return;
 		}
 
-		// HLS fallback. The playlist describes the full movie up front
-		// (synthetic VOD), so seeking and resume work via the standard
-		// `currentTime = X` path — the server starts/restarts the
-		// transcoder as the player requests new segments.
+		// HLS fallback. The master describes every rendition; per-variant
+		// playlists describe the full movie up front (synthetic VOD), so
+		// seeking and resume work via the standard `currentTime = X`
+		// path — the server starts/restarts the transcoder as the player
+		// requests new segments.
 		usingHls = true;
-		const playlistUrl = `/api/movies/${d.movie.id}/hls/playlist.m3u8`;
+		const playlistUrl = `/api/movies/${d.movie.id}/hls/master.m3u8`;
 
 		if (el.canPlayType('application/vnd.apple.mpegurl')) {
 			// Safari has native HLS support — let it do its thing.

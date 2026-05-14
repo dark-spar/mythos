@@ -82,4 +82,4 @@ Phase 6 — Jellyfin-API compatibility shim
 
 ## License
 
-AGPL-3.0-or-later.
+MIT — see [LICENSE](LICENSE).

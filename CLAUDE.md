@@ -74,8 +74,8 @@ MYTHOS_SKIP_WEB_BUILD=1 cargo test --workspace
 ## Conventions
 
 - **Edition 2024**, MSRV 1.95 (pinned in `rust-toolchain.toml`).
-- **License**: AGPL-3.0-or-later, matching Jellyfin and the broader self-hosted
-  media-server ecosystem. New files should be added under that license.
+- **License**: MIT. New files should be added under that license; no
+  per-file headers required.
 - **Commits**: conventional-style subject (`feat:`, `fix:`, `refactor:`, …),
   imperative mood, body explaining *why*, not *what*.
 - **Errors**: `thiserror` for library crates (typed errors crossing crate

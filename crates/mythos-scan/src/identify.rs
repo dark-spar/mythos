@@ -23,7 +23,7 @@ pub struct Identity {
     pub year: Option<i64>,
 }
 
-pub fn identify(path: &Path) -> Identity {
+pub fn identify_movie(path: &Path) -> Identity {
     let stem = path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -62,7 +62,11 @@ fn parse(s: &str) -> Option<Identity> {
     Some(Identity { title, year })
 }
 
-fn clean(raw: &str) -> String {
+/// Collapse `.`, `_`, `-` to spaces and squeeze whitespace runs.
+///
+/// Shared with `identify_tv.rs` — cleaning is the same regardless of
+/// what came out of the upstream regex match.
+pub(crate) fn clean(raw: &str) -> String {
     raw.chars()
         .map(|c| match c {
             '.' | '_' | '-' => ' ',
@@ -80,7 +84,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn id(path: &str) -> Identity {
-        identify(&PathBuf::from(path))
+        identify_movie(&PathBuf::from(path))
     }
 
     #[test]
@@ -117,4 +121,5 @@ mod tests {
         assert_eq!(i.title, "family reunion");
         assert_eq!(i.year, None);
     }
+
 }

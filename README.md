@@ -77,7 +77,7 @@ log_filter = "info,mythos=debug,sqlx=warn"
 - Phase 0 — foundation ✅
 - Phase 1 — library scan + browse + auth ✅ *(movies-only slice)*
 - Phase 2 — direct-play streaming ✅
-- Phase 3 — TV, music, photos, books ⏳ *next*
+- Phase 3 — TV, music, photos, books ⏳ *in progress (3a: TV data layer + scanner + TMDb enrichment shipped)*
 - Phase 4 — HLS transcoding ✅
 - Phase 5 — device profiles + ABR + hardware acceleration ✅ *(through 5d)*
 - Phase 6 — Jellyfin-API compatibility shim

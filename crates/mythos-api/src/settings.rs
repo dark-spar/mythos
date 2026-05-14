@@ -106,4 +106,3 @@ pub async fn put_settings(
 
     get_settings(State(pool), _user).await
 }
-

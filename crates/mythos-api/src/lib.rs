@@ -9,6 +9,7 @@ pub mod play;
 pub mod scan;
 pub mod settings;
 pub mod subtitles;
+pub mod tv;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -150,6 +151,15 @@ pub fn router(state: ApiState) -> Router {
             "/api/movies/{id}/progress",
             axum::routing::put(movie::put_progress),
         )
+        .route("/api/libraries/{id}/series", get(tv::list_series))
+        .route("/api/series/{id}", get(tv::get_series))
+        .route("/api/series/{id}/poster", get(tv::series_poster))
+        .route(
+            "/api/series/{id}/seasons/{season_number}",
+            get(tv::get_season),
+        )
+        .route("/api/episodes/{id}", get(tv::get_episode))
+        .route("/api/episodes/{id}/still", get(tv::episode_still))
         .route(
             "/api/settings",
             get(settings::get_settings).put(settings::put_settings),

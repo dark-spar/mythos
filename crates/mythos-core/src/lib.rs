@@ -5,6 +5,7 @@ pub mod media;
 pub mod movie;
 pub mod profile;
 pub mod subtitle;
+pub mod tv;
 
 pub use library::{Library, LibraryKind, NewLibrary};
 pub use media::{MediaItem, MediaKind};
@@ -14,3 +15,4 @@ pub use profile::{
     decide,
 };
 pub use subtitle::{NewSubtitle, SubtitleTrack, is_image_subtitle_codec};
+pub use tv::{Episode, EpisodeProgress, NewEpisode, NewSeason, NewSeries, Season, Series};

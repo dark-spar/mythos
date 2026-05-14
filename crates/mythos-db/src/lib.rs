@@ -1,16 +1,24 @@
 //! Database access layer: connection pool, migrations, and query helpers.
 
+pub mod episode;
+pub mod episode_progress;
 pub mod library;
 pub mod media_file;
 pub mod movie;
 pub mod progress;
+pub mod season;
+pub mod series;
 pub mod settings;
 pub mod subtitle;
 
+pub use episode::EpisodeRepo;
+pub use episode_progress::EpisodeProgressRepo;
 pub use library::LibraryRepo;
 pub use media_file::MediaFileRepo;
 pub use movie::{MovieRepo, UnenrichedMovie};
 pub use progress::ProgressRepo;
+pub use season::SeasonRepo;
+pub use series::{SeriesRepo, UnenrichedSeries};
 pub use settings::SettingsRepo;
 pub use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
@@ -32,6 +40,21 @@ pub enum DbError {
     /// Insert hit the `idx_libraries_root_path` unique index.
     #[error("a library with that root path already exists")]
     RootPathTaken,
+}
+
+impl DbError {
+    /// True if this is a SQLite UNIQUE constraint violation. The TV
+    /// scanner uses this to demote `(season_id, episode_number)`
+    /// duplicates to a WARN log (different files claiming the same
+    /// episode slot) rather than a hard error that pollutes
+    /// `ScanReport::errors`.
+    pub fn is_unique_violation(&self) -> bool {
+        if let DbError::Sqlx(sqlx::Error::Database(db_err)) = self {
+            matches!(db_err.kind(), sqlx::error::ErrorKind::UniqueViolation)
+        } else {
+            false
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;

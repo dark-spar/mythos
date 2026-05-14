@@ -1,37 +1,21 @@
-//! Library scan orchestrator: walk → identify → probe → upsert →
-//! optional TMDb enrichment, then prune anything not touched.
+//! Top-level scan orchestrator.
 //!
-//! For movies-kind libraries we identify and upsert a movie row per
-//! file. Non-movies libraries are no-ops in Phase 1c (file rows are not
-//! created either, so a future scanner for that kind can pick up
-//! whatever schema it needs without colliding with stale movie rows).
-//!
-//! Pruning collects every relative path the walker yielded and asks the
-//! repo to delete media_files outside that set. Cascade FKs remove the
-//! associated movies. Path-based pruning (rather than timestamp-based)
-//! is robust to wall-clock precision and removes a subtle race in
-//! back-to-back scans.
-//!
-//! Enrichment is idempotent: only movies with NULL `tmdb_id` are
-//! contacted, so re-running a scan after enabling TMDb fills in
-//! anything that was indexed earlier without re-fetching what's already
-//! enriched. Search failures and poster download failures are logged
-//! and accumulated into `ScanReport::errors`; they do not abort the
-//! scan.
+//! Per-kind scanners live alongside this module ([`crate::movies`],
+//! [`crate::tv`]); this file just dispatches on `library.kind` and
+//! owns the shared [`ScanReport`] shape so per-kind reports stay
+//! comparable.
 
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
-use mythos_core::{Library, LibraryKind, NewMediaFile, NewMovie, Probe};
-use mythos_db::{MediaFileRepo, MovieRepo};
+use mythos_core::{Library, LibraryKind};
 use mythos_meta::TmdbClient;
 use serde::Serialize;
 use sqlx::SqlitePool;
-use tracing::{info, warn};
+use tracing::info;
 
-use crate::identify::identify;
-use crate::probe::probe;
-use crate::walk::video_files;
+use crate::movies::scan_movies_library;
+use crate::tv::scan_tv_library;
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ScanReport {
@@ -48,252 +32,27 @@ pub async fn scan_library(
     library: &Library,
     tmdb: Option<&TmdbClient>,
 ) -> ScanReport {
-    let started = Instant::now();
-    let mut report = ScanReport::default();
-    let mut seen_paths: Vec<String> = Vec::new();
-
-    if library.kind != LibraryKind::Movies {
-        info!(
-            library = %library.name,
-            kind = library.kind.as_str(),
-            "scan skipped: only movies are implemented in Phase 1c"
-        );
-        report.duration_ms = started.elapsed().as_millis() as u64;
-        return report;
-    }
-
-    let files = video_files(&library.root_path);
-    info!(
-        library = %library.name,
-        files = files.len(),
-        "starting scan"
-    );
-
-    let files_repo = MediaFileRepo::new(pool.clone());
-    let movies_repo = MovieRepo::new(pool.clone());
-
-    for absolute in files {
-        let relative = match absolute.strip_prefix(&library.root_path) {
-            Ok(p) => p.to_path_buf(),
-            Err(_) => {
-                report
-                    .errors
-                    .push(format!("path outside library root: {}", absolute.display()));
-                continue;
-            }
-        };
-
-        let identity = identify(&relative);
-        info!(
-            file = %relative.display(),
-            title = %identity.title,
-            year = ?identity.year,
-            "identified"
-        );
-
-        let (size_bytes, mtime) = match file_stats(&absolute).await {
-            Ok(s) => s,
-            Err(err) => {
-                report
-                    .errors
-                    .push(format!("stat {}: {err}", absolute.display()));
-                continue;
-            }
-        };
-
-        let probe_data = match probe(&absolute).await {
-            Ok(p) => {
-                info!(
-                    title = %identity.title,
-                    container = p.container.as_deref().unwrap_or("?"),
-                    video = p.video_codec.as_deref().unwrap_or("?"),
-                    audio = p.audio_codec.as_deref().unwrap_or("?"),
-                    duration_seconds = p.duration_seconds.unwrap_or(0.0),
-                    "probed"
-                );
-                p
-            }
-            Err(err) => {
-                warn!(
-                    error = %err,
-                    file = %absolute.display(),
-                    "ffprobe failed; indexing with empty technical metadata"
-                );
-                Probe::default()
-            }
-        };
-
-        let upsert = files_repo
-            .upsert(NewMediaFile {
-                library_id: library.id,
-                path: relative.clone(),
-                size_bytes,
-                mtime,
-                probe: probe_data,
-            })
-            .await;
-        let (file, inserted) = match upsert {
-            Ok(v) => v,
-            Err(err) => {
-                report
-                    .errors
-                    .push(format!("upsert file {}: {err}", relative.display()));
-                continue;
-            }
-        };
-
-        // Record the relative path for pruning. Repo already validated
-        // UTF-8 at upsert time, so the path_buf round-trip is safe.
-        if let Some(p) = relative.to_str() {
-            seen_paths.push(p.to_string());
-        }
-
-        // Clone the title before moving identity into NewMovie so we
-        // can still reference it in the post-upsert log line.
-        let title_for_log = identity.title.clone();
-        let year_for_log = identity.year;
-
-        if let Err(err) = movies_repo
-            .upsert(NewMovie {
-                library_id: library.id,
-                file_id: file.id,
-                title: identity.title,
-                year: identity.year,
-            })
-            .await
-        {
-            report
-                .errors
-                .push(format!("upsert movie {}: {err}", relative.display()));
-            continue;
-        }
-
-        let action = if inserted { "added" } else { "updated" };
-        info!(
-            title = %title_for_log,
-            year = ?year_for_log,
-            action,
-            "indexed"
-        );
-
-        if inserted {
-            report.added += 1;
-        } else {
-            report.updated += 1;
-        }
-    }
-
-    report.removed = match files_repo.prune_unseen(library.id, &seen_paths).await {
-        Ok(n) => n,
-        Err(err) => {
-            report.errors.push(format!("prune unseen: {err}"));
-            0
-        }
-    };
-
-    if let Some(client) = tmdb {
-        enrich_pass(&movies_repo, library.id, client, &mut report).await;
-    }
-
-    report.duration_ms = started.elapsed().as_millis() as u64;
-    info!(
-        library = %library.name,
-        added = report.added,
-        updated = report.updated,
-        removed = report.removed,
-        enriched = report.enriched,
-        errors = report.errors.len(),
-        duration_ms = report.duration_ms,
-        "scan complete"
-    );
-
-    report
-}
-
-async fn enrich_pass(
-    movies: &MovieRepo,
-    library_id: uuid::Uuid,
-    tmdb: &TmdbClient,
-    report: &mut ScanReport,
-) {
-    let pending = match movies.list_unenriched_by_library(library_id).await {
-        Ok(v) => v,
-        Err(err) => {
-            report.errors.push(format!("list unenriched: {err}"));
-            return;
-        }
-    };
-
-    info!(pending = pending.len(), "tmdb enrichment pass starting");
-
-    for movie in pending {
-        let search = match tmdb.search_movie(&movie.title, movie.year).await {
-            Ok(v) => v,
-            Err(err) => {
-                warn!(
-                    error = %err,
-                    title = %movie.title,
-                    year = ?movie.year,
-                    "tmdb search failed"
-                );
-                report
-                    .errors
-                    .push(format!("tmdb search {}: {err}", movie.title));
-                continue;
-            }
-        };
-        let Some(matched) = search else {
+    match library.kind {
+        LibraryKind::Movies => scan_movies_library(pool, library, tmdb).await,
+        LibraryKind::Shows => scan_tv_library(pool, library, tmdb).await,
+        other => {
+            let started = Instant::now();
             info!(
-                title = %movie.title,
-                year = ?movie.year,
-                "tmdb: no match"
+                library = %library.name,
+                kind = other.as_str(),
+                "scan skipped: library kind not yet implemented"
             );
-            continue;
-        };
-
-        info!(
-            title = %movie.title,
-            tmdb_id = matched.tmdb_id,
-            tmdb_title = %matched.title,
-            tmdb_year = ?matched.release_year,
-            has_poster = matched.poster_path.is_some(),
-            "tmdb: matched"
-        );
-
-        let poster_url = match matched.poster_path.as_deref() {
-            Some(path) => match tmdb.download_poster(path, &movie.id.to_string()).await {
-                Ok(_) => Some(format!("/api/movies/{}/poster", movie.id)),
-                Err(err) => {
-                    warn!(
-                        error = %err,
-                        movie = %movie.title,
-                        "poster download failed; persisting metadata without poster"
-                    );
-                    None
-                }
-            },
-            None => None,
-        };
-
-        if let Err(err) = movies
-            .apply_tmdb(
-                movie.id,
-                matched.tmdb_id,
-                matched.overview.as_deref(),
-                poster_url.as_deref(),
-            )
-            .await
-        {
-            report
-                .errors
-                .push(format!("apply tmdb {}: {err}", movie.title));
-            continue;
+            ScanReport {
+                duration_ms: started.elapsed().as_millis() as u64,
+                ..Default::default()
+            }
         }
-        report.enriched += 1;
     }
 }
 
-async fn file_stats(path: &std::path::Path) -> std::io::Result<(i64, DateTime<Utc>)> {
+/// stat() a path into the `(size_bytes, mtime)` pair the scanners need
+/// to upsert a `media_files` row. Shared by movies and tv scanners.
+pub(crate) async fn file_stats(path: &std::path::Path) -> std::io::Result<(i64, DateTime<Utc>)> {
     let metadata = tokio::fs::metadata(path).await?;
     let size_bytes = metadata.len() as i64;
     let mtime = metadata

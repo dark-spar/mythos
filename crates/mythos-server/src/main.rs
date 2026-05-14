@@ -106,7 +106,9 @@ async fn main() -> Result<()> {
             )))
         }
         None => {
-            info!("TMDb API key not set; metadata enrichment disabled (settable via admin UI or MYTHOS_TMDB_API_KEY)");
+            info!(
+                "TMDb API key not set; metadata enrichment disabled (settable via admin UI or MYTHOS_TMDB_API_KEY)"
+            );
             TmdbHandle::default()
         }
     };

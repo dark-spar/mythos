@@ -1,10 +1,12 @@
 //! TMDb (The Movie Database) client.
 //!
-//! Covers the two endpoints the scanner needs:
-//! - `GET /3/search/movie?query=...&year=...` → top-result match for a
-//!   filename-identified movie.
-//! - `GET https://image.tmdb.org/t/p/{size}/{path}` → poster image,
-//!   streamed to disk.
+//! Covers the endpoints the scanner needs for movies and TV:
+//! - `GET /3/search/movie?query=...&year=...`
+//! - `GET /3/search/tv?query=...&first_air_date_year=...`
+//! - `GET /3/tv/{id}/season/{n}` (returns season + per-episode metadata
+//!   in one round-trip)
+//! - `GET https://image.tmdb.org/t/p/{size}/{path}` for poster and
+//!   episode-still images, streamed to disk.
 //!
 //! Rate-limited with a single-permit semaphore + ~250ms min interval
 //! (≈ 4 RPS, well below TMDb's free-tier 40-requests-per-10s ceiling).
@@ -74,6 +76,38 @@ pub struct TmdbMatch {
     pub overview: Option<String>,
     pub release_year: Option<i64>,
     pub poster_path: Option<String>,
+}
+
+/// Top-result match from a TMDb TV search.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TmdbTvMatch {
+    pub tmdb_id: i64,
+    pub name: String,
+    pub overview: Option<String>,
+    pub first_air_year: Option<i64>,
+    pub poster_path: Option<String>,
+}
+
+/// One season's worth of metadata plus the episodes it contains. TMDb
+/// returns the season and all its episodes in a single response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TmdbSeason {
+    pub tmdb_id: i64,
+    pub season_number: i64,
+    pub name: Option<String>,
+    pub overview: Option<String>,
+    pub poster_path: Option<String>,
+    pub episodes: Vec<TmdbEpisode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TmdbEpisode {
+    pub tmdb_id: i64,
+    pub episode_number: i64,
+    pub name: Option<String>,
+    pub overview: Option<String>,
+    pub still_path: Option<String>,
+    pub air_date: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -171,13 +205,17 @@ impl TmdbClient {
     }
 
     /// Download the poster image associated with `poster_path` to
-    /// `{posters_dir}/{movie_id}.jpg`. Streams the body to disk rather
+    /// `{posters_dir}/{item_id}.jpg`. Streams the body to disk rather
     /// than buffering. Returns the relative file name (e.g.
     /// `"abc123.jpg"`); callers prepend the API mount point.
+    ///
+    /// `item_id` is the local UUID the API serves the poster under,
+    /// usually a movie id or series id. Different item kinds live in
+    /// the same directory because their UUIDs don't collide.
     pub async fn download_poster(
         &self,
         poster_path: &str,
-        movie_id: &str,
+        item_id: &str,
     ) -> Result<String, TmdbError> {
         self.wait_for_slot().await;
 
@@ -191,27 +229,157 @@ impl TmdbClient {
             return Err(TmdbError::Status(status));
         }
 
-        let filename = format!("{movie_id}.jpg");
+        let filename = format!("{item_id}.jpg");
         let dest = self.cfg.posters_dir.join(&filename);
-        // Make sure the parent exists. mythos-server creates this on
-        // startup too, but make download_poster safe to call standalone.
-        if let Some(parent) = dest.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-
-        let tmp = dest.with_extension("jpg.tmp");
-        let mut file = tokio::fs::File::create(&tmp).await?;
-        let mut stream = res.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let bytes = chunk?;
-            file.write_all(&bytes).await?;
-        }
-        file.flush().await?;
-        drop(file);
-        tokio::fs::rename(&tmp, &dest).await?;
-
+        write_streamed_to_disk(res, &dest).await?;
         Ok(filename)
     }
+
+    /// Search TMDb TV by title (+ optional first-air-year hint).
+    pub async fn search_tv(
+        &self,
+        title: &str,
+        year: Option<i64>,
+    ) -> Result<Option<TmdbTvMatch>, TmdbError> {
+        self.wait_for_slot().await;
+
+        let mut params: Vec<(&str, String)> = vec![
+            ("query", title.to_string()),
+            ("include_adult", "false".to_string()),
+            ("language", "en-US".to_string()),
+        ];
+        if let Some(y) = year {
+            params.push(("first_air_date_year", y.to_string()));
+        }
+
+        let url = format!("{}/search/tv", self.cfg.api_base);
+        let mut req = self.http.get(&url).query(&params);
+        if is_v4_token(&self.cfg.api_key) {
+            req = req.bearer_auth(&self.cfg.api_key);
+        } else {
+            req = req.query(&[("api_key", &self.cfg.api_key)]);
+        }
+        let res = req.send().await?;
+        let status = res.status();
+        if !status.is_success() {
+            return Err(TmdbError::Status(status));
+        }
+
+        let body: TvSearchResponse = res.json().await?;
+        let Some(first) = body.results.into_iter().next() else {
+            debug!(title, year, "tmdb tv search returned no results");
+            return Ok(None);
+        };
+
+        let first_air_year = first
+            .first_air_date
+            .as_deref()
+            .and_then(|s| s.get(..4))
+            .and_then(|y| y.parse::<i64>().ok());
+
+        Ok(Some(TmdbTvMatch {
+            tmdb_id: first.id,
+            name: first.name,
+            overview: first.overview.filter(|s| !s.is_empty()),
+            first_air_year,
+            poster_path: first.poster_path,
+        }))
+    }
+
+    /// Fetch a single season + its episode list. TMDb returns both in
+    /// one response, which is why the scanner enriches a whole season
+    /// of episodes per HTTP call instead of one-by-one.
+    pub async fn get_tv_season(
+        &self,
+        tv_id: i64,
+        season_number: i64,
+    ) -> Result<TmdbSeason, TmdbError> {
+        self.wait_for_slot().await;
+
+        let url = format!(
+            "{}/tv/{}/season/{}",
+            self.cfg.api_base, tv_id, season_number
+        );
+        let mut req = self.http.get(&url).query(&[("language", "en-US")]);
+        if is_v4_token(&self.cfg.api_key) {
+            req = req.bearer_auth(&self.cfg.api_key);
+        } else {
+            req = req.query(&[("api_key", &self.cfg.api_key)]);
+        }
+        let res = req.send().await?;
+        let status = res.status();
+        if !status.is_success() {
+            return Err(TmdbError::Status(status));
+        }
+
+        let body: SeasonResponse = res.json().await?;
+        let episodes = body
+            .episodes
+            .into_iter()
+            .map(|e| TmdbEpisode {
+                tmdb_id: e.id,
+                episode_number: e.episode_number,
+                name: e.name.filter(|s| !s.is_empty()),
+                overview: e.overview.filter(|s| !s.is_empty()),
+                still_path: e.still_path,
+                air_date: e.air_date,
+            })
+            .collect();
+
+        Ok(TmdbSeason {
+            tmdb_id: body.id,
+            season_number: body.season_number,
+            name: body.name.filter(|s| !s.is_empty()),
+            overview: body.overview.filter(|s| !s.is_empty()),
+            poster_path: body.poster_path,
+            episodes,
+        })
+    }
+
+    /// Download an episode still to `{posters_dir}/stills/{episode_id}.jpg`.
+    /// Stills are 16:9 thumbnails so they live in their own subdirectory
+    /// to keep them sorted away from 2:3 posters.
+    pub async fn download_still(
+        &self,
+        still_path: &str,
+        episode_id: &str,
+    ) -> Result<String, TmdbError> {
+        self.wait_for_slot().await;
+
+        let url = format!(
+            "{}/{}{}",
+            self.cfg.image_base, self.cfg.poster_size, still_path
+        );
+        let res = self.http.get(&url).send().await?;
+        let status = res.status();
+        if !status.is_success() {
+            return Err(TmdbError::Status(status));
+        }
+
+        let filename = format!("{episode_id}.jpg");
+        let dest = self.cfg.posters_dir.join("stills").join(&filename);
+        write_streamed_to_disk(res, &dest).await?;
+        Ok(filename)
+    }
+}
+
+/// Stream an HTTP response body to a file via a `.tmp` sibling, then
+/// rename atomically. Creates parent directories as needed.
+async fn write_streamed_to_disk(res: reqwest::Response, dest: &Path) -> Result<(), TmdbError> {
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let tmp = dest.with_extension("jpg.tmp");
+    let mut file = tokio::fs::File::create(&tmp).await?;
+    let mut stream = res.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk?;
+        file.write_all(&bytes).await?;
+    }
+    file.flush().await?;
+    drop(file);
+    tokio::fs::rename(&tmp, dest).await?;
+    Ok(())
 }
 
 pub fn poster_file_path(posters_dir: &Path, movie_id: &str) -> PathBuf {
@@ -241,4 +409,50 @@ struct SearchResult {
     release_date: Option<String>,
     #[serde(default)]
     poster_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TvSearchResponse {
+    #[serde(default)]
+    results: Vec<TvSearchResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TvSearchResult {
+    id: i64,
+    name: String,
+    #[serde(default)]
+    overview: Option<String>,
+    #[serde(default)]
+    first_air_date: Option<String>,
+    #[serde(default)]
+    poster_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SeasonResponse {
+    id: i64,
+    season_number: i64,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    overview: Option<String>,
+    #[serde(default)]
+    poster_path: Option<String>,
+    #[serde(default)]
+    episodes: Vec<SeasonEpisodeResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SeasonEpisodeResponse {
+    id: i64,
+    episode_number: i64,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    overview: Option<String>,
+    #[serde(default)]
+    still_path: Option<String>,
+    #[serde(default)]
+    air_date: Option<String>,
 }

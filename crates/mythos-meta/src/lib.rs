@@ -6,4 +6,6 @@
 
 pub mod tmdb;
 
-pub use tmdb::{TmdbClient, TmdbConfig, TmdbError, TmdbMatch};
+pub use tmdb::{
+    TmdbClient, TmdbConfig, TmdbEpisode, TmdbError, TmdbMatch, TmdbSeason, TmdbTvMatch,
+};

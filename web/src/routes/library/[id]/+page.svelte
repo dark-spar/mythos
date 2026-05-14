@@ -4,9 +4,11 @@
 	import { ApiError } from '$lib/api';
 	import { getLibrary, type Library } from '$lib/libraries';
 	import { listMovies, type Movie } from '$lib/movies';
+	import { listSeries, type Series } from '$lib/tv';
 
 	let library = $state<Library | null>(null);
 	let movies = $state<Movie[]>([]);
+	let series = $state<Series[]>([]);
 	let total = $state(0);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
@@ -19,13 +21,23 @@
 			loading = true;
 			error = null;
 			try {
-				const [lib, listing] = await Promise.all([
-					getLibrary(currentId),
-					listMovies(currentId, { limit: 200 })
-				]);
+				const lib = await getLibrary(currentId);
 				library = lib;
-				movies = listing.items;
-				total = listing.total;
+				if (lib.kind === 'shows') {
+					const listing = await listSeries(currentId, { limit: 200 });
+					series = listing.items;
+					movies = [];
+					total = listing.total;
+				} else if (lib.kind === 'movies') {
+					const listing = await listMovies(currentId, { limit: 200 });
+					movies = listing.items;
+					series = [];
+					total = listing.total;
+				} else {
+					movies = [];
+					series = [];
+					total = 0;
+				}
 			} catch (e) {
 				error =
 					e instanceof ApiError
@@ -44,6 +56,18 @@
 	function yearLabel(year: number | null): string {
 		return year != null ? `(${year})` : '';
 	}
+
+	const emptyHint = $derived.by(() => {
+		if (!library) return '';
+		switch (library.kind) {
+			case 'movies':
+				return 'No movies indexed yet. Run a scan from the admin page if files have been added.';
+			case 'shows':
+				return 'No series indexed yet. Run a scan from the admin page if files have been added.';
+			default:
+				return `Library kind "${library.kind}" is not yet supported.`;
+		}
+	});
 </script>
 
 <svelte:head>
@@ -70,13 +94,52 @@
 			</p>
 		</header>
 
-		{#if movies.length === 0}
+		{#if library.kind === 'shows'}
+			{#if series.length === 0}
+				<p class="mt-12 text-zinc-500">
+					{emptyHint}
+					{#if total > 200}
+						Showing first 200 of {total}.
+					{/if}
+				</p>
+			{:else}
+				<ul class="mt-10 grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-4 sm:gap-5">
+					{#each series as item (item.id)}
+						<li>
+							<a href={resolve(`/series/${item.id}`)} class="block transition hover:opacity-80">
+								{#if item.poster_url}
+									<img
+										src={item.poster_url}
+										alt="{item.title} poster"
+										loading="lazy"
+										class="aspect-[2/3] w-full rounded bg-zinc-100 object-cover dark:bg-zinc-900"
+									/>
+								{:else}
+									<div
+										class="flex aspect-[2/3] items-center justify-center rounded bg-zinc-100 p-3 text-center text-xs text-zinc-400 dark:bg-zinc-900"
+									>
+										<span class="line-clamp-3 font-medium">{item.title}</span>
+									</div>
+								{/if}
+								<p
+									class="mt-2 truncate text-sm font-medium text-zinc-900 dark:text-zinc-100"
+									title={item.title}
+								>
+									{item.title}
+								</p>
+								{#if item.year != null}
+									<p class="text-xs text-zinc-500">{yearLabel(item.year)}</p>
+								{/if}
+							</a>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+		{:else if movies.length === 0}
 			<p class="mt-12 text-zinc-500">
-				No movies indexed yet.
+				{emptyHint}
 				{#if total > 200}
 					Showing first 200 of {total}.
-				{:else}
-					Run a scan from the admin page if files have been added.
 				{/if}
 			</p>
 		{:else}

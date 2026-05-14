@@ -99,8 +99,15 @@ Track which phase we're in; don't pull work forward without a reason.
   artists/photos/books is **not yet built** — comes in Phase 3.
 - **Phase 2 — direct-play streaming (done).** `GET /api/movies/:id/stream`
   byte-range, Vidstack binding, debounced watch progress, resume.
-- **Phase 3 — TV, music, photos, books (NEXT).** Series hierarchy, music tags
-  via `lofty` + MusicBrainz, photo thumbnails + EXIF, EPUB metadata + `epub.js`.
+- **Phase 3 — TV, music, photos, books (in progress).**
+  - 3a (done): TV schema (series → seasons → episodes + episode_progress),
+    filename identifier for `S01E01` / `1x01` with season-dir fallback, TV
+    scanner branch keyed on `LibraryKind::Shows`, TMDb TV enrichment
+    (`search_tv` + `tv/{id}/season/{n}` + episode stills), read-only
+    `/api/series/*` + `/api/episodes/*` surface for verification.
+  - 3b NEXT: TV browse UI (series grid → seasons → episodes).
+  - 3c: episode playback (stream/play/HLS for episodes; reuse the movies
+    pipeline). Music / photos / books are their own follow-on sub-phases.
 - **Phase 4 — HLS transcoding (done).** FFmpeg subprocess manager,
   segmented HLS, seek-by-restart.
 - **Phase 5 — profiles + ABR + hwaccel (done through 5d).** Hardware probe

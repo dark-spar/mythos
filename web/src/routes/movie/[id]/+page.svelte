@@ -134,13 +134,12 @@
 		playPlan = plan;
 
 		let url = plan.stream_url;
-		if (burnInSubId && plan.mode === 'direct_play') {
-			// Burn-in requires the HLS encoder; override the
-			// direct-play URL with a full re-encode.
+		if (burnInSubId) {
+			// Burn-in requires the video encoder, so any mode that
+			// keeps `-c:v copy` (direct_play / remux / transcode_audio)
+			// silently drops the overlay filter. Force a full
+			// re-encode regardless of what /play picked.
 			url = `/api/movies/${d.movie.id}/hls/master.m3u8?mode=transcode_full&sub=${burnInSubId}`;
-		} else if (burnInSubId) {
-			const joiner = url.includes('?') ? '&' : '?';
-			url = `${url}${joiner}sub=${burnInSubId}`;
 		}
 
 		const goingHls = plan.mode !== 'direct_play' || burnInSubId !== null;

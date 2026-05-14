@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use axum::Router;
-use mythos_api::{CookieConfig, HlsHandle, PostersDir, ScanTracker, TmdbHandle};
+use mythos_api::{CookieConfig, HlsHandle, PostersDir, ScanTracker, SubtitlesDir, TmdbHandle};
 use mythos_auth::TokenConfig;
 use mythos_meta::{TmdbClient, TmdbConfig};
 use mythos_stream::{TranscodeManager, resolve_hwaccel};
@@ -53,6 +53,10 @@ async fn main() -> Result<()> {
     let posters_dir = cfg.posters_dir();
     std::fs::create_dir_all(&posters_dir)
         .with_context(|| format!("creating posters dir at {}", posters_dir.display()))?;
+
+    let subtitles_dir = cfg.subtitles_dir();
+    std::fs::create_dir_all(&subtitles_dir)
+        .with_context(|| format!("creating subtitles dir at {}", subtitles_dir.display()))?;
 
     let transcode_dir = cfg.transcode_dir();
     std::fs::create_dir_all(&transcode_dir)
@@ -110,7 +114,15 @@ async fn main() -> Result<()> {
         }
     };
 
-    let app = build_app(pool, token, cookies, tmdb, PostersDir(posters_dir), hls);
+    let app = build_app(
+        pool,
+        token,
+        cookies,
+        tmdb,
+        PostersDir(posters_dir),
+        SubtitlesDir(subtitles_dir),
+        hls,
+    );
 
     let listener = TcpListener::bind(cfg.listen)
         .await
@@ -130,12 +142,14 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_app(
     db: mythos_db::SqlitePool,
     token: TokenConfig,
     cookies: CookieConfig,
     tmdb: TmdbHandle,
     posters_dir: PostersDir,
+    subtitles_dir: SubtitlesDir,
     hls: HlsHandle,
 ) -> Router {
     let api = mythos_api::router(mythos_api::ApiState {
@@ -145,6 +159,7 @@ fn build_app(
         scans: ScanTracker::new(),
         tmdb,
         posters_dir,
+        subtitles_dir,
         hls,
     });
     Router::new()

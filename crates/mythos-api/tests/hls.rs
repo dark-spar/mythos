@@ -12,7 +12,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
-use mythos_api::{ApiState, CookieConfig, HlsHandle, PostersDir, ScanTracker, TmdbHandle};
+use mythos_api::{ApiState, CookieConfig, HlsHandle, PostersDir, ScanTracker, TmdbHandle, SubtitlesDir};
 use mythos_auth::TokenConfig;
 use mythos_stream::TranscodeManager;
 use serde_json::{Value, json};
@@ -40,6 +40,7 @@ async fn setup() -> (Router, SqlitePool, TempDir) {
         scans: ScanTracker::new(),
         tmdb: TmdbHandle::default(),
         posters_dir: PostersDir(std::env::temp_dir()),
+        subtitles_dir: SubtitlesDir(std::env::temp_dir()),
         hls: HlsHandle(Some(manager)),
     });
     (router, pool, transcode_dir)

@@ -76,4 +76,8 @@ impl Config {
     pub fn transcode_dir(&self) -> PathBuf {
         self.data_dir.join("transcode")
     }
+
+    pub fn subtitles_dir(&self) -> PathBuf {
+        self.data_dir.join("subtitles")
+    }
 }

@@ -7,12 +7,15 @@
 //! browser API for rendering them out-of-band. Those go through the
 //! HLS burn-in path instead, so this endpoint returns 422 for them.
 //!
-//! WebVTT is built on demand by spawning ffmpeg with the captured
-//! stream index. Subtitle tracks are small (≤ a few hundred KB even
-//! for a feature) so we collect the output into memory; that
-//! sidesteps streaming-ffmpeg-stdout-back-out plumbing and keeps the
-//! handler easy to reason about. The browser caches by URL, and
-//! sub_id only changes on rescan.
+//! Extraction is slow: ffmpeg has to scan the container end-to-end
+//! to find subtitle packets, which for a 60GB Blu-ray remux can take
+//! a minute or more. To avoid hitting that on every request (and the
+//! 30s default that was previously timing out before the first byte
+//! arrived), we cache the extracted WebVTT to disk on first request
+//! and serve from cache thereafter. The cache key is the subtitle's
+//! UUID, which is regenerated on every rescan — orphaned cache
+//! files are tolerated; they're tiny and re-extraction is cheap if
+//! they need to be remade.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -26,12 +29,16 @@ use sqlx::SqlitePool;
 use tokio::process::Command;
 use uuid::Uuid;
 
+use crate::SubtitlesDir;
 use crate::error::{ApiError, ApiResult};
 
-const FFMPEG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// 5 minutes. Long enough to scan a feature-length Blu-ray remux,
+/// short enough that a wedged ffmpeg eventually frees the request.
+const FFMPEG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 pub async fn webvtt(
     State(pool): State<SqlitePool>,
+    State(cache_dir): State<SubtitlesDir>,
     _user: AuthUser,
     Path((movie_id, sub_id)): Path<(Uuid, Uuid)>,
 ) -> ApiResult<Response> {
@@ -54,8 +61,19 @@ pub async fn webvtt(
         ));
     }
 
-    let abs = resolve_input_path(&pool, movie_id).await?;
-    let body = extract_webvtt(&abs, sub.stream_index).await?;
+    let cache_path = cache_dir.0.join(format!("{sub_id}.vtt"));
+    let body = if let Some(cached) = read_if_present(&cache_path).await {
+        cached
+    } else {
+        let abs = resolve_input_path(&pool, movie_id).await?;
+        let extracted = extract_webvtt(&abs, sub.stream_index).await?;
+        // Write-through cache. Best-effort: a write failure here just
+        // means we'll re-extract on the next request.
+        if let Err(err) = write_cache(&cache_path, &extracted).await {
+            tracing::warn!(?err, path = %cache_path.display(), "subtitle cache write failed");
+        }
+        extracted
+    };
 
     let mut res = (StatusCode::OK, body).into_response();
     let h = res.headers_mut();
@@ -67,6 +85,24 @@ pub async fn webvtt(
         HeaderValue::from_static("private, max-age=3600"),
     );
     Ok(res)
+}
+
+async fn read_if_present(path: &std::path::Path) -> Option<Vec<u8>> {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => Some(bytes),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            tracing::warn!(?err, path = %path.display(), "subtitle cache read failed");
+            None
+        }
+    }
+}
+
+async fn write_cache(path: &std::path::Path, body: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(path, body).await
 }
 
 async fn resolve_input_path(pool: &SqlitePool, movie_id: Uuid) -> ApiResult<PathBuf> {

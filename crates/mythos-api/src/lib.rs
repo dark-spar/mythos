@@ -37,6 +37,12 @@ pub struct CookieConfig {
 #[derive(Clone, Debug)]
 pub struct PostersDir(pub PathBuf);
 
+/// Directory where extracted WebVTT subtitle caches live. Lazy
+/// write-through cache: first request triggers extraction + write;
+/// subsequent requests serve from disk.
+#[derive(Clone, Debug)]
+pub struct SubtitlesDir(pub PathBuf);
+
 /// Optional TMDb client. `None` means no API key was configured and the
 /// scanner skips enrichment.
 #[derive(Clone, Default)]
@@ -50,6 +56,7 @@ pub struct ApiState {
     pub scans: ScanTracker,
     pub tmdb: TmdbHandle,
     pub posters_dir: PostersDir,
+    pub subtitles_dir: SubtitlesDir,
     pub hls: HlsHandle,
 }
 

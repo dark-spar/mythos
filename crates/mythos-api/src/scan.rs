@@ -116,10 +116,14 @@ pub async fn start(
 
     let tracker_for_task = tracker.clone();
     let pool_for_task = pool.clone();
-    let tmdb_for_task = tmdb.0.clone();
+    let tmdb_for_task = tmdb.clone();
     tokio::spawn(async move {
+        // Snapshot the current TMDb client at scan start so the
+        // scan uses whatever was configured when the user kicked it
+        // off, even if the admin saves a new key mid-scan.
+        let tmdb_client = tmdb_for_task.snapshot().await;
         let report =
-            mythos_scan::scan_library(&pool_for_task, &library, tmdb_for_task.as_deref()).await;
+            mythos_scan::scan_library(&pool_for_task, &library, tmdb_client.as_deref()).await;
         if !report.errors.is_empty() {
             warn!(
                 library = %library.name,

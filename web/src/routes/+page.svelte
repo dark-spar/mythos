@@ -40,6 +40,12 @@
 						>
 							Libraries
 						</a>
+						<a
+							href={resolve('/admin/settings')}
+							class="underline-offset-2 hover:text-zinc-900 hover:underline dark:hover:text-zinc-100"
+						>
+							Settings
+						</a>
 					{/if}
 					<button
 						class="underline-offset-2 hover:text-zinc-900 hover:underline dark:hover:text-zinc-100"

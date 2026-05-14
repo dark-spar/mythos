@@ -7,6 +7,7 @@ pub mod library;
 pub mod movie;
 pub mod play;
 pub mod scan;
+pub mod settings;
 pub mod subtitles;
 
 use std::path::PathBuf;
@@ -18,9 +19,12 @@ use axum::{
     routing::{get, post},
 };
 use mythos_auth::TokenConfig;
-use mythos_meta::TmdbClient;
+use mythos_db::SettingsRepo;
+use mythos_db::settings::keys as setting_keys;
+use mythos_meta::{TmdbClient, TmdbConfig};
 use serde::Serialize;
 use sqlx::SqlitePool;
+use tokio::sync::RwLock;
 
 pub use error::{ApiError, ApiResult};
 pub use hls::HlsHandle;
@@ -43,10 +47,54 @@ pub struct PostersDir(pub PathBuf);
 #[derive(Clone, Debug)]
 pub struct SubtitlesDir(pub PathBuf);
 
-/// Optional TMDb client. `None` means no API key was configured and the
-/// scanner skips enrichment.
+/// Optional TMDb client wrapped in a runtime-mutable handle. `None`
+/// inside means no API key is currently configured and the scanner
+/// skips enrichment. The settings PUT handler swaps the inner
+/// value live so a freshly-saved key takes effect on the very next
+/// scan without a server restart.
 #[derive(Clone, Default)]
-pub struct TmdbHandle(pub Option<Arc<TmdbClient>>);
+pub struct TmdbHandle(pub Arc<RwLock<Option<Arc<TmdbClient>>>>);
+
+impl TmdbHandle {
+    pub fn new(client: Option<Arc<TmdbClient>>) -> Self {
+        Self(Arc::new(RwLock::new(client)))
+    }
+
+    pub async fn snapshot(&self) -> Option<Arc<TmdbClient>> {
+        self.0.read().await.clone()
+    }
+
+    pub async fn replace(&self, client: Option<Arc<TmdbClient>>) {
+        *self.0.write().await = client;
+    }
+}
+
+/// Source of truth for the API key the TMDb client should use.
+/// Env var wins so the systemd-unit-and-done deployment story stays
+/// intact even when an operator also pokes the value in the
+/// browser UI.
+pub async fn resolve_tmdb_api_key(pool: &SqlitePool) -> Option<String> {
+    if let Ok(value) = std::env::var("MYTHOS_TMDB_API_KEY") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    SettingsRepo::new(pool.clone())
+        .get(setting_keys::TMDB_API_KEY)
+        .await
+        .ok()
+        .flatten()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+pub fn build_tmdb_client(api_key: &str, posters_dir: PathBuf) -> Arc<TmdbClient> {
+    Arc::new(TmdbClient::new(TmdbConfig::new(
+        api_key.to_string(),
+        posters_dir,
+    )))
+}
 
 #[derive(Clone, FromRef)]
 pub struct ApiState {
@@ -101,6 +149,10 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/api/movies/{id}/progress",
             axum::routing::put(movie::put_progress),
+        )
+        .route(
+            "/api/settings",
+            get(settings::get_settings).put(settings::put_settings),
         )
         .with_state(state)
 }

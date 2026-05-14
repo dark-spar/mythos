@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use axum::Router;
 use mythos_api::{CookieConfig, HlsHandle, PostersDir, ScanTracker, SubtitlesDir, TmdbHandle};
 use mythos_auth::TokenConfig;
-use mythos_meta::{TmdbClient, TmdbConfig};
 use mythos_stream::{TranscodeManager, resolve_hwaccel};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -95,21 +94,19 @@ async fn main() -> Result<()> {
         });
     }
 
-    let tmdb = match cfg
-        .tmdb_api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
+    // Resolve the active TMDb key from either env or the DB.
+    // Settings live in the new `settings` table; env var still wins.
+    let tmdb_key = mythos_api::resolve_tmdb_api_key(&pool).await;
+    let tmdb = match tmdb_key {
         Some(key) => {
             info!("TMDb enrichment enabled");
-            TmdbHandle(Some(Arc::new(TmdbClient::new(TmdbConfig::new(
-                key.to_string(),
+            TmdbHandle::new(Some(mythos_api::build_tmdb_client(
+                &key,
                 posters_dir.clone(),
-            )))))
+            )))
         }
         None => {
-            info!("MYTHOS_TMDB_API_KEY not set; metadata enrichment disabled");
+            info!("TMDb API key not set; metadata enrichment disabled (settable via admin UI or MYTHOS_TMDB_API_KEY)");
             TmdbHandle::default()
         }
     };

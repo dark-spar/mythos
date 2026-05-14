@@ -1,13 +1,17 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import Hls from 'hls.js';
+	import { goto } from '$app/navigation';
 	import { subtitleLabel, type MediaFile, type PlayResponse, type SubtitleTrack } from '../movies';
 	import { clientProfile } from '../profile';
 	import {
+		AUTOPLAY_COUNTDOWN_SECONDS,
 		hlsMasterUrl,
+		loadAutoPlay,
 		loadSavedSub,
 		putItemProgress,
 		requestItemPlay,
+		saveAutoPlay,
 		saveSub,
 		sendItemProgressBeacon,
 		stopTranscodeSession,
@@ -23,14 +27,28 @@
 		/// Absolute href the overlay back-link points at. Movies use the
 		/// library page; episodes use the series page.
 		backHref: string;
+		/// Optional "up next" target. When provided AND the user has
+		/// auto-play enabled, the player shows a countdown card on the
+		/// `ended` event and navigates to `href` when it elapses. The
+		/// toggle and countdown card are hidden when this is omitted
+		/// (e.g. on movie pages).
+		next?: { href: string; label: string };
 		/// Caller can react to the server-side playback decision once
 		/// it's resolved (e.g., render a diagnostic banner outside the
 		/// player). Optional.
 		onPlanResolved?: (plan: PlayResponse) => void;
 	};
 
-	const { kind, itemId, file, subtitles, initialPositionSeconds, backHref, onPlanResolved }: Props =
-		$props();
+	const {
+		kind,
+		itemId,
+		file,
+		subtitles,
+		initialPositionSeconds,
+		backHref,
+		next,
+		onPlanResolved
+	}: Props = $props();
 
 	let videoEl: HTMLVideoElement | undefined = $state();
 	let lastSavedAt = 0;
@@ -85,6 +103,62 @@
 
 	const SAVE_INTERVAL_MS = 10_000;
 
+	// Auto-play-next state. The toggle is global to the browser
+	// (stored under a single localStorage key) and only visible when
+	// `next` is provided. The countdown is local to the current
+	// component instance.
+	let autoPlayEnabled = $state(true);
+	let countdownActive = $state(false);
+	let countdownRemaining = $state(AUTOPLAY_COUNTDOWN_SECONDS);
+	let countdownTimer: ReturnType<typeof setInterval> | null = null;
+
+	function toggleAutoPlay() {
+		autoPlayEnabled = !autoPlayEnabled;
+		saveAutoPlay(autoPlayEnabled);
+		if (!autoPlayEnabled) cancelCountdown();
+	}
+
+	function startCountdown() {
+		if (!next || !autoPlayEnabled || countdownActive) return;
+		countdownActive = true;
+		countdownRemaining = AUTOPLAY_COUNTDOWN_SECONDS;
+		countdownTimer = setInterval(() => {
+			countdownRemaining -= 1;
+			if (countdownRemaining <= 0) {
+				navigateNext();
+			}
+		}, 1000);
+	}
+
+	function cancelCountdown() {
+		if (countdownTimer) {
+			clearInterval(countdownTimer);
+			countdownTimer = null;
+		}
+		countdownActive = false;
+	}
+
+	function navigateNext() {
+		const href = next?.href;
+		cancelCountdown();
+		// `next.href` is composed by the caller from runtime ids
+		// (`/episodes/{uuid}`), so SvelteKit's typed resolve() can't
+		// type-check it; navigating with the dynamic string is the
+		// intended behavior.
+		// eslint-disable-next-line svelte/no-navigation-without-resolve
+		if (href) void goto(href);
+	}
+
+	function handleEnded() {
+		startCountdown();
+	}
+
+	function handlePlaying() {
+		// User resumed (seeked back, replayed end, etc.) — bail on the
+		// queued navigation.
+		if (countdownActive) cancelCountdown();
+	}
+
 	$effect(() => {
 		if (!videoEl) return;
 		const burnInSubId = imageSubId;
@@ -95,6 +169,7 @@
 		})();
 		return () => {
 			cancelled = true;
+			cancelCountdown();
 			detachPlayer();
 		};
 	});
@@ -418,6 +493,7 @@
 	}
 
 	onMount(() => {
+		autoPlayEnabled = loadAutoPlay();
 		document.addEventListener('visibilitychange', handleVisibilityChange);
 		window.addEventListener('beforeunload', handleBeforeUnload);
 		window.addEventListener('keydown', handleKeydown);
@@ -459,6 +535,8 @@
 		onloadedmetadata={handleLoadedMetadata}
 		ontimeupdate={handleTimeUpdate}
 		onpause={handlePause}
+		onended={handleEnded}
+		onplaying={handlePlaying}
 	>
 		{#if textSub && trackBlobUrl && videoReady}
 			{#key trackBlobUrl}
@@ -474,6 +552,44 @@
 		{/if}
 		Your browser can't play this file directly.
 	</video>
+
+	{#if next && countdownActive}
+		<!--
+			Up-next countdown card. Bottom-right overlay; positioned
+			above the native controls so it remains tappable on touch.
+			Clicking the card body navigates immediately; the
+			Cancel button stays here on the current item.
+		-->
+		<!-- eslint-disable svelte/no-navigation-without-resolve -->
+		<div
+			class="pointer-events-auto absolute right-4 bottom-20 z-10 w-72 rounded-lg bg-black/80 p-4 text-sm text-zinc-100 shadow-lg backdrop-blur"
+			role="dialog"
+			aria-label="Up next"
+		>
+			<p class="text-xs tracking-wide text-zinc-400 uppercase">Up next</p>
+			<p class="mt-1 truncate font-medium" title={next.label}>{next.label}</p>
+			<p class="mt-2 text-xs text-zinc-400">
+				Playing in {countdownRemaining}s
+			</p>
+			<div class="mt-3 flex justify-end gap-2">
+				<button
+					type="button"
+					class="rounded border border-zinc-700 px-3 py-1 text-xs text-zinc-200 hover:bg-zinc-800"
+					onclick={cancelCountdown}
+				>
+					Cancel
+				</button>
+				<button
+					type="button"
+					class="rounded bg-rose-600 px-3 py-1 text-xs font-medium text-white hover:bg-rose-500"
+					onclick={navigateNext}
+				>
+					Play now
+				</button>
+			</div>
+		</div>
+		<!-- eslint-enable svelte/no-navigation-without-resolve -->
+	{/if}
 </section>
 
 <div class="mx-auto max-w-5xl px-6 pt-6">
@@ -494,6 +610,17 @@
 				<span class="text-xs text-zinc-400">— burning into stream</span>
 			{/if}
 		</div>
+	{/if}
+	{#if next}
+		<label class="mt-3 flex cursor-pointer items-center gap-2 text-sm text-zinc-400">
+			<input
+				type="checkbox"
+				checked={autoPlayEnabled}
+				onchange={toggleAutoPlay}
+				class="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-rose-500 focus:ring-rose-500"
+			/>
+			<span>Auto-play next episode</span>
+		</label>
 	{/if}
 	{#if playPlan && playPlan.mode !== 'direct_play'}
 		<div

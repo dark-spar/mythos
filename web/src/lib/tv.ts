@@ -64,14 +64,25 @@ export interface EpisodeProgress {
 	updated_at: string;
 }
 
+/// Lightweight episode reference returned for the prev/next slots on
+/// EpisodeDetail. Crosses season boundaries, so `season_number` is
+/// authoritative for the neighbor (do NOT borrow from the current
+/// episode's season for the label).
+export interface EpisodeNeighbor {
+	id: string;
+	season_number: number;
+	episode_number: number;
+	title: string | null;
+}
+
 export interface EpisodeDetail {
 	episode: Episode;
 	season: Season;
 	series: Series;
 	file: MediaFile;
 	subtitles: SubtitleTrack[];
-	prev: Episode | null;
-	next: Episode | null;
+	prev: EpisodeNeighbor | null;
+	next: EpisodeNeighbor | null;
 	progress: EpisodeProgress | null;
 }
 

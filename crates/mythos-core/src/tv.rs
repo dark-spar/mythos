@@ -71,6 +71,19 @@ pub struct NewEpisode {
     pub title: Option<String>,
 }
 
+/// Lightweight episode reference used for previous/next navigation,
+/// carrying enough metadata (id, season number, episode number,
+/// title) to render a link without a follow-up fetch. Crosses season
+/// boundaries at the ends of a series, so `season_number` is needed
+/// to label the neighbor correctly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpisodeNeighbor {
+    pub id: Uuid,
+    pub season_number: i64,
+    pub episode_number: i64,
+    pub title: Option<String>,
+}
+
 /// Per-user resume point for an episode. Same shape as
 /// [`crate::WatchProgress`]; kept as a sibling type so future API
 /// responses can distinguish episode progress from movie progress

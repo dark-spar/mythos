@@ -1,7 +1,7 @@
 //! `episodes` repository.
 
 use chrono::{DateTime, Utc};
-use mythos_core::{Episode, NewEpisode};
+use mythos_core::{Episode, EpisodeNeighbor, NewEpisode};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
@@ -36,6 +36,25 @@ impl EpisodeRow {
             air_date: self.air_date,
             created_at: parse_ts("episode created_at", &self.created_at)?,
             updated_at: parse_ts("episode updated_at", &self.updated_at)?,
+        })
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct NeighborRow {
+    id: String,
+    season_number: i64,
+    episode_number: i64,
+    title: Option<String>,
+}
+
+impl NeighborRow {
+    fn into_neighbor(self) -> Result<EpisodeNeighbor> {
+        Ok(EpisodeNeighbor {
+            id: parse_uuid("episode neighbor id", &self.id)?,
+            season_number: self.season_number,
+            episode_number: self.episode_number,
+            title: self.title,
         })
     }
 }
@@ -114,7 +133,7 @@ impl EpisodeRepo {
     pub async fn find_neighbors(
         &self,
         episode_id: Uuid,
-    ) -> Result<(Option<Episode>, Option<Episode>)> {
+    ) -> Result<(Option<EpisodeNeighbor>, Option<EpisodeNeighbor>)> {
         let series_row: Option<(String,)> = sqlx::query_as(
             "SELECT s.series_id FROM episodes e \
              JOIN seasons s ON s.id = e.season_id \
@@ -127,10 +146,8 @@ impl EpisodeRepo {
             return Ok((None, None));
         };
 
-        let rows: Vec<EpisodeRow> = sqlx::query_as(
-            "SELECT e.id, e.season_id, e.file_id, e.episode_number, e.title, \
-                    e.tmdb_id, e.overview, e.still_url, e.air_date, \
-                    e.created_at, e.updated_at \
+        let rows: Vec<NeighborRow> = sqlx::query_as(
+            "SELECT e.id, s.season_number, e.episode_number, e.title \
              FROM episodes e \
              JOIN seasons s ON s.id = e.season_id \
              WHERE s.series_id = ? \
@@ -140,15 +157,15 @@ impl EpisodeRepo {
         .fetch_all(&self.pool)
         .await?;
 
-        let episodes: Vec<Episode> = rows
+        let neighbors: Vec<EpisodeNeighbor> = rows
             .into_iter()
-            .map(EpisodeRow::into_episode)
+            .map(NeighborRow::into_neighbor)
             .collect::<Result<_>>()?;
-        let Some(i) = episodes.iter().position(|e| e.id == episode_id) else {
+        let Some(i) = neighbors.iter().position(|e| e.id == episode_id) else {
             return Ok((None, None));
         };
-        let prev = i.checked_sub(1).and_then(|p| episodes.get(p).cloned());
-        let next = episodes.get(i + 1).cloned();
+        let prev = i.checked_sub(1).and_then(|p| neighbors.get(p).cloned());
+        let next = neighbors.get(i + 1).cloned();
         Ok((prev, next))
     }
 

@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
+	import { afterNavigate } from '$app/navigation';
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import { ApiError } from '$lib/api';
@@ -17,45 +19,51 @@
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 
-	const id = $derived(page.params.id as string);
+	async function loadDetail(seriesId: string) {
+		loading = true;
+		error = null;
+		episodesBySeason = {};
+		try {
+			const detail = await getSeries(seriesId);
+			series = detail.series;
+			seasons = detail.seasons;
 
-	$effect(() => {
-		const currentId = id;
-		(async () => {
-			loading = true;
-			error = null;
-			episodesBySeason = {};
-			try {
-				const detail = await getSeries(currentId);
-				series = detail.series;
-				seasons = detail.seasons;
-
-				const all = await Promise.all(
-					detail.seasons.map((s) =>
-						getSeason(detail.series.id, s.season_number).then((sd) => ({
-							id: s.id,
-							episodes: sd.episodes
-						}))
-					)
-				);
-				const map: Record<string, Episode[]> = {};
-				for (const { id: seasonId, episodes } of all) {
-					map[seasonId] = episodes;
-				}
-				episodesBySeason = map;
-			} catch (e) {
-				error =
-					e instanceof ApiError
-						? e.code === 'not_found'
-							? 'That series no longer exists.'
-							: e.code.replace(/_/g, ' ')
-						: e instanceof Error
-							? e.message
-							: 'failed to load series';
-			} finally {
-				loading = false;
+			const all = await Promise.all(
+				detail.seasons.map((s) =>
+					getSeason(detail.series.id, s.season_number).then((sd) => ({
+						id: s.id,
+						episodes: sd.episodes
+					}))
+				)
+			);
+			const map: Record<string, Episode[]> = {};
+			for (const { id: seasonId, episodes } of all) {
+				map[seasonId] = episodes;
 			}
-		})();
+			episodesBySeason = map;
+		} catch (e) {
+			error =
+				e instanceof ApiError
+					? e.code === 'not_found'
+						? 'That series no longer exists.'
+						: e.code.replace(/_/g, ' ')
+					: e instanceof Error
+						? e.message
+						: 'failed to load series';
+		} finally {
+			loading = false;
+		}
+	}
+
+	// `onMount` covers initial mount; `afterNavigate` covers same-route
+	// client-side navs that $effect reading page.params.id missed.
+	onMount(() => {
+		void loadDetail(page.params.id as string);
+	});
+
+	afterNavigate((nav) => {
+		if (nav.type === 'enter') return;
+		void loadDetail(page.params.id as string);
 	});
 
 	function episodeLabel(ep: Episode): string {

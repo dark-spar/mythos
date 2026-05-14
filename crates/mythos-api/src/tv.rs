@@ -12,7 +12,9 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use mythos_auth::AuthUser;
-use mythos_core::{Episode, EpisodeProgress, MediaFile, Season, Series, SubtitleTrack};
+use mythos_core::{
+    Episode, EpisodeNeighbor, EpisodeProgress, MediaFile, Season, Series, SubtitleTrack,
+};
 use mythos_db::{
     EpisodeProgressRepo, EpisodeRepo, MediaFileRepo, SeasonRepo, SeriesRepo, SubtitleRepo,
 };
@@ -69,10 +71,12 @@ pub struct EpisodeDetail {
     pub subtitles: Vec<SubtitleTrack>,
     /// Previous episode in the series — `None` if this is the first
     /// episode in season 1 (or however the operator's content
-    /// orders).
-    pub prev: Option<Episode>,
+    /// orders). Lightweight shape so the UI can render the
+    /// prev/next labels (which may live in a different season) without
+    /// a follow-up fetch.
+    pub prev: Option<EpisodeNeighbor>,
     /// Next episode in the series — `None` at the last episode.
-    pub next: Option<Episode>,
+    pub next: Option<EpisodeNeighbor>,
     /// Per-user resume point. `None` when the requesting user has not
     /// played this episode yet.
     pub progress: Option<EpisodeProgress>,

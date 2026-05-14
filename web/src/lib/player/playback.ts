@@ -159,3 +159,35 @@ export function episodeLabel(seasonNumber: number, episodeNumber: number): strin
 
 export const fetchSeasonDetail = (seriesId: string, seasonNumber: number) =>
 	apiGet(`/api/series/${seriesId}/seasons/${seasonNumber}`);
+
+/** Single localStorage key for the global auto-play-next preference. */
+const AUTOPLAY_STORAGE_KEY = 'mythos:autoplay-next';
+
+/** Seconds the auto-play countdown card shows before navigating. */
+export const AUTOPLAY_COUNTDOWN_SECONDS = 5;
+
+/**
+ * Read the auto-play-next preference. Defaults to `true` for new users
+ * — the polished-feature default — and returns `true` if localStorage
+ * is unavailable (private mode, etc.) so the feature works
+ * out-of-the-box even when persistence fails.
+ */
+export function loadAutoPlay(): boolean {
+	try {
+		const raw = localStorage.getItem(AUTOPLAY_STORAGE_KEY);
+		if (raw === null) return true;
+		return raw === 'true';
+	} catch {
+		return true;
+	}
+}
+
+/** Persist the auto-play-next preference. */
+export function saveAutoPlay(enabled: boolean): void {
+	try {
+		localStorage.setItem(AUTOPLAY_STORAGE_KEY, enabled ? 'true' : 'false');
+	} catch {
+		// localStorage disabled — ignore; runtime falls back to the
+		// in-memory state for this session.
+	}
+}

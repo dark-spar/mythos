@@ -17,4 +17,6 @@ pub use profile::{
     decide,
 };
 pub use subtitle::{NewSubtitle, SubtitleTrack, is_image_subtitle_codec};
-pub use tv::{Episode, EpisodeProgress, NewEpisode, NewSeason, NewSeries, Season, Series};
+pub use tv::{
+    Episode, EpisodeNeighbor, EpisodeProgress, NewEpisode, NewSeason, NewSeries, Season, Series,
+};

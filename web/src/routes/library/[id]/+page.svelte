@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
+	import { afterNavigate } from '$app/navigation';
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import { ApiError } from '$lib/api';
@@ -13,44 +15,50 @@
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 
-	const id = $derived(page.params.id as string);
-
-	$effect(() => {
-		const currentId = id;
-		(async () => {
-			loading = true;
-			error = null;
-			try {
-				const lib = await getLibrary(currentId);
-				library = lib;
-				if (lib.kind === 'shows') {
-					const listing = await listSeries(currentId, { limit: 200 });
-					series = listing.items;
-					movies = [];
-					total = listing.total;
-				} else if (lib.kind === 'movies') {
-					const listing = await listMovies(currentId, { limit: 200 });
-					movies = listing.items;
-					series = [];
-					total = listing.total;
-				} else {
-					movies = [];
-					series = [];
-					total = 0;
-				}
-			} catch (e) {
-				error =
-					e instanceof ApiError
-						? e.code === 'not_found'
-							? 'That library no longer exists.'
-							: e.code.replace(/_/g, ' ')
-						: e instanceof Error
-							? e.message
-							: 'failed to load library';
-			} finally {
-				loading = false;
+	async function loadDetail(libraryId: string) {
+		loading = true;
+		error = null;
+		try {
+			const lib = await getLibrary(libraryId);
+			library = lib;
+			if (lib.kind === 'shows') {
+				const listing = await listSeries(libraryId, { limit: 200 });
+				series = listing.items;
+				movies = [];
+				total = listing.total;
+			} else if (lib.kind === 'movies') {
+				const listing = await listMovies(libraryId, { limit: 200 });
+				movies = listing.items;
+				series = [];
+				total = listing.total;
+			} else {
+				movies = [];
+				series = [];
+				total = 0;
 			}
-		})();
+		} catch (e) {
+			error =
+				e instanceof ApiError
+					? e.code === 'not_found'
+						? 'That library no longer exists.'
+						: e.code.replace(/_/g, ' ')
+					: e instanceof Error
+						? e.message
+						: 'failed to load library';
+		} finally {
+			loading = false;
+		}
+	}
+
+	// `onMount` covers initial mount; `afterNavigate` covers same-route
+	// client-side navs that $effect reading page.params.id missed.
+	onMount(() => {
+		void loadDetail(page.params.id as string);
+	});
+
+	afterNavigate((nav) => {
+		if (nav.type === 'enter') return;
+		void loadDetail(page.params.id as string);
 	});
 
 	function yearLabel(year: number | null): string {

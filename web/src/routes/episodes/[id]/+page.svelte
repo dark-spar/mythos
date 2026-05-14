@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
+	import { afterNavigate } from '$app/navigation';
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import { ApiError } from '$lib/api';
@@ -10,29 +12,39 @@
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 
-	const id = $derived(page.params.id as string);
+	async function loadDetail(episodeId: string) {
+		loading = true;
+		error = null;
+		detail = null;
+		try {
+			detail = await getEpisode(episodeId);
+		} catch (e) {
+			error =
+				e instanceof ApiError
+					? e.code === 'not_found'
+						? 'That episode no longer exists.'
+						: e.code.replace(/_/g, ' ')
+					: e instanceof Error
+						? e.message
+						: 'failed to load episode';
+		} finally {
+			loading = false;
+		}
+	}
 
-	$effect(() => {
-		const currentId = id;
-		(async () => {
-			loading = true;
-			error = null;
-			detail = null;
-			try {
-				detail = await getEpisode(currentId);
-			} catch (e) {
-				error =
-					e instanceof ApiError
-						? e.code === 'not_found'
-							? 'That episode no longer exists.'
-							: e.code.replace(/_/g, ' ')
-						: e instanceof Error
-							? e.message
-							: 'failed to load episode';
-			} finally {
-				loading = false;
-			}
-		})();
+	// `onMount` covers the initial mount (also fires when the layout's
+	// auth gate finally renders this page after a hard refresh).
+	// `afterNavigate` covers subsequent client-side navigations,
+	// including same-route ones like /episodes/A → /episodes/B where a
+	// $effect reading page.params.id did not re-trigger reliably. The
+	// `type === 'enter'` skip avoids double-fetching on initial mount.
+	onMount(() => {
+		void loadDetail(page.params.id as string);
+	});
+
+	afterNavigate((nav) => {
+		if (nav.type === 'enter') return;
+		void loadDetail(page.params.id as string);
 	});
 
 	function episodeLabel(seasonNumber: number, episodeNumber: number): string {
@@ -74,6 +86,12 @@
 			detail.progress && detail.progress.position_seconds > 1
 				? detail.progress.position_seconds
 				: null}
+		{@const upNext = detail.next
+			? {
+					href: `/episodes/${detail.next.id}`,
+					label: `${episodeLabel(detail.next.season_number, detail.next.episode_number)}${detail.next.title ? ` — ${detail.next.title}` : ''}`
+				}
+			: undefined}
 		<Player
 			kind="episode"
 			itemId={detail.episode.id}
@@ -81,6 +99,7 @@
 			subtitles={detail.subtitles}
 			initialPositionSeconds={initialPosition}
 			backHref={`/series/${detail.series.id}`}
+			next={upNext}
 		/>
 
 		<div class="mx-auto max-w-5xl px-6 pt-6">

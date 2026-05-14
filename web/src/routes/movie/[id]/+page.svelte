@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
+	import { afterNavigate } from '$app/navigation';
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import { ApiError } from '$lib/api';
@@ -15,29 +17,38 @@
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 
-	const id = $derived(page.params.id as string);
+	async function loadDetail(movieId: string) {
+		loading = true;
+		error = null;
+		detail = null;
+		try {
+			detail = await getMovie(movieId);
+		} catch (e) {
+			error =
+				e instanceof ApiError
+					? e.code === 'not_found'
+						? 'That movie no longer exists.'
+						: e.code.replace(/_/g, ' ')
+					: e instanceof Error
+						? e.message
+						: 'failed to load movie';
+		} finally {
+			loading = false;
+		}
+	}
 
-	$effect(() => {
-		const currentId = id;
-		(async () => {
-			loading = true;
-			error = null;
-			detail = null;
-			try {
-				detail = await getMovie(currentId);
-			} catch (e) {
-				error =
-					e instanceof ApiError
-						? e.code === 'not_found'
-							? 'That movie no longer exists.'
-							: e.code.replace(/_/g, ' ')
-						: e instanceof Error
-							? e.message
-							: 'failed to load movie';
-			} finally {
-				loading = false;
-			}
-		})();
+	// `onMount` covers the initial mount; `afterNavigate` covers
+	// subsequent client-side navs, including same-route ones where
+	// $effect reading page.params.id did not re-trigger reliably.
+	// Skipping `type === 'enter'` avoids double-fetching on first
+	// load.
+	onMount(() => {
+		void loadDetail(page.params.id as string);
+	});
+
+	afterNavigate((nav) => {
+		if (nav.type === 'enter') return;
+		void loadDetail(page.params.id as string);
 	});
 </script>
 

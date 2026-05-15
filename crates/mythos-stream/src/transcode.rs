@@ -581,7 +581,7 @@ async fn launch_ffmpeg(
         }
     } else {
         for (i, rendition) in renditions.iter().enumerate() {
-            cmd.args(accel.abr_video_encoder_args(i, rendition, tonemap));
+            cmd.args(accel.abr_video_encoder_args(i, rendition));
         }
     }
 

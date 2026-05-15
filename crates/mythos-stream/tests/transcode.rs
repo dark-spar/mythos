@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use mythos_core::PlaybackMode;
+use mythos_core::{PlaybackMode, ffmpeg_bin};
 use mythos_stream::{ABR_LADDER, ItemKind, SessionKey, TranscodeManager, wait_for_file};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -17,7 +17,7 @@ fn make_test_input(dir: &std::path::Path) -> PathBuf {
     // Synthetic video + silent audio — the ABR transcoder's
     // var_stream_map references audio for each rendition, so a
     // video-only input would fail to mux.
-    let status = Command::new("ffmpeg")
+    let status = Command::new(ffmpeg_bin())
         .args([
             "-y",
             "-loglevel",

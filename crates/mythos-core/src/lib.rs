@@ -1,6 +1,7 @@
 //! Domain types shared across the Mythos workspace.
 
 pub mod activity;
+pub mod ffmpeg;
 pub mod library;
 pub mod media;
 pub mod movie;
@@ -9,6 +10,7 @@ pub mod subtitle;
 pub mod tv;
 
 pub use activity::{ContinueWatchingEpisode, ContinueWatchingItem, ContinueWatchingMovie};
+pub use ffmpeg::{ffmpeg_bin, ffprobe_bin};
 pub use library::{Library, LibraryKind, NewLibrary};
 pub use media::{MediaItem, MediaKind};
 pub use movie::{MediaFile, Movie, NewMediaFile, NewMovie, Probe, WatchProgress, sort_title};

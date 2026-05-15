@@ -23,6 +23,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use mythos_auth::AuthUser;
+use mythos_core::ffmpeg_bin;
 use mythos_db::SubtitleRepo;
 use sqlx::SqlitePool;
 use tokio::process::Command;
@@ -121,7 +122,7 @@ async fn write_cache(path: &std::path::Path, body: &[u8]) -> std::io::Result<()>
 }
 
 async fn extract_webvtt(input: &std::path::Path, stream_index: i64) -> ApiResult<Vec<u8>> {
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = Command::new(ffmpeg_bin());
     cmd.arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")

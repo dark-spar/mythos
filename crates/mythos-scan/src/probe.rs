@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use mythos_core::{NewSubtitle, Probe, is_image_subtitle_codec};
+use mythos_core::{NewSubtitle, Probe, ffprobe_bin, is_image_subtitle_codec};
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::process::Command;
@@ -28,7 +28,7 @@ pub enum ProbeError {
 }
 
 pub async fn probe(path: &Path) -> Result<Probe, ProbeError> {
-    let output = Command::new("ffprobe")
+    let output = Command::new(ffprobe_bin())
         .arg("-v")
         .arg("error")
         .arg("-print_format")

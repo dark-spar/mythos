@@ -29,7 +29,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mythos_core::PlaybackMode;
+use mythos_core::{PlaybackMode, ffmpeg_bin};
 use thiserror::Error;
 use tokio::io::AsyncBufReadExt;
 use tokio::process::{Child, Command};
@@ -495,7 +495,7 @@ async fn launch_ffmpeg(
     let copy_video = matches!(mode, PlaybackMode::Remux | PlaybackMode::TranscodeAudio);
     let copy_audio = matches!(mode, PlaybackMode::Remux | PlaybackMode::TranscodeVideo);
 
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = Command::new(ffmpeg_bin());
     cmd.arg("-hide_banner").arg("-loglevel").arg("warning");
     if !copy_video {
         // HW decode flags only matter when we're going to re-encode.

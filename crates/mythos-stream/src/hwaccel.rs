@@ -25,6 +25,7 @@
 
 use std::process::Stdio;
 
+use mythos_core::ffmpeg_bin;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
@@ -299,7 +300,7 @@ async fn auto_detect() -> HwAccel {
 /// Parse `ffmpeg -encoders` for the H.264 encoders it advertises.
 /// Returns just the encoder names (e.g. "libx264", "h264_qsv").
 async fn list_encoders() -> Result<Vec<String>, DetectError> {
-    let mut child = Command::new("ffmpeg")
+    let mut child = Command::new(ffmpeg_bin())
         .arg("-hide_banner")
         .arg("-encoders")
         .stdout(Stdio::piped())
@@ -338,7 +339,7 @@ async fn list_encoders() -> Result<Vec<String>, DetectError> {
 /// failures (wrong driver / missing libraries / permission errors on
 /// `/dev/dri`) all surface here.
 async fn smoke_test(accel: HwAccel) -> bool {
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = Command::new(ffmpeg_bin());
     cmd.arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")

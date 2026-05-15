@@ -16,6 +16,7 @@ use mythos_api::{
     ApiState, CookieConfig, HlsHandle, PostersDir, ScanTracker, SubtitlesDir, TmdbHandle,
 };
 use mythos_auth::TokenConfig;
+use mythos_core::ffmpeg_bin;
 use mythos_stream::TranscodeManager;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
@@ -53,7 +54,7 @@ fn make_test_input(dir: &std::path::Path) -> PathBuf {
     // Synthetic video + silent audio — the ABR transcoder's
     // var_stream_map references audio for each rendition, so a
     // video-only input would fail to mux.
-    let status = Command::new("ffmpeg")
+    let status = Command::new(ffmpeg_bin())
         .args([
             "-y",
             "-loglevel",

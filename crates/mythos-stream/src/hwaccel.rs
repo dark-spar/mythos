@@ -367,7 +367,23 @@ impl HwAccel {
 
     /// Per-variant video encoder args, indexed by output position so
     /// `-c:v:N`/`-b:v:N`/etc. apply to the right output stream.
-    pub fn abr_video_encoder_args(self, output_index: usize, rendition: &Rendition) -> Vec<String> {
+    ///
+    /// When `tonemap.apply` is true the pixels have been remapped to
+    /// SDR BT.709 by the filter graph, but ffmpeg would otherwise copy
+    /// the source's HDR color tags (`bt2020nc` / `smpte2084`) straight
+    /// into the output H.264 VUI parameters — players and TVs then
+    /// apply an HDR→SDR transform on already-SDR pixels, which is the
+    /// classic "washed out / oversaturated" symptom (most visible on
+    /// VAAPI, where `tonemap_vaapi` only updates surface metadata that
+    /// `h264_vaapi` doesn't forward to the encoded SPS). We force the
+    /// SDR tags onto every rendition's output stream so the bitstream
+    /// matches the pixels.
+    pub fn abr_video_encoder_args(
+        self,
+        output_index: usize,
+        rendition: &Rendition,
+        tonemap: TonemapConfig,
+    ) -> Vec<String> {
         let kbps = rendition.video_bitrate_kbps;
         // Standard VBV bracket: target bitrate, maxrate ~10% above,
         // bufsize = 2× target. Keeps the encoder honest about
@@ -404,6 +420,19 @@ impl HwAccel {
                 args.extend([format!("-preset:v:{output_index}"), "p4".into()]);
             }
             HwAccel::Vaapi | HwAccel::VideoToolbox => {}
+        }
+
+        if tonemap.apply {
+            args.extend([
+                format!("-color_primaries:v:{output_index}"),
+                "bt709".into(),
+                format!("-color_trc:v:{output_index}"),
+                "bt709".into(),
+                format!("-colorspace:v:{output_index}"),
+                "bt709".into(),
+                format!("-color_range:v:{output_index}"),
+                "tv".into(),
+            ]);
         }
 
         args
@@ -860,5 +889,87 @@ mod tests {
         // yuv420p, so we need an explicit format step before the
         // upload back to GPU surfaces.
         assert!(chain.contains("format=nv12,hwupload"));
+    }
+
+    #[test]
+    fn abr_video_encoder_args_force_bt709_output_tags_when_tonemapping() {
+        // Without explicit overrides, ffmpeg copies the source's HDR
+        // color tags (smpte2084 / bt2020nc) into the output H.264 SPS
+        // even though the pixels have been tonemapped to SDR — players
+        // then re-tonemap an already-SDR signal and the result is
+        // washed out / oversaturated. Most visible on VAAPI because
+        // tonemap_vaapi only updates surface metadata that h264_vaapi
+        // doesn't forward. Guard against the regression on every
+        // encoder.
+        let rendition = &crate::ABR_LADDER[0];
+        let tonemap = TonemapConfig {
+            apply: true,
+            algorithm: TonemapAlgorithm::Hable,
+            pipeline: TonemapPipeline::Hardware,
+        };
+        for accel in [
+            HwAccel::Cpu,
+            HwAccel::Nvenc,
+            HwAccel::Qsv,
+            HwAccel::Vaapi,
+            HwAccel::VideoToolbox,
+        ] {
+            let args = accel.abr_video_encoder_args(0, rendition, tonemap);
+            assert!(
+                args.iter().any(|a| a == "-color_primaries:v:0"),
+                "{accel:?} missing color_primaries override"
+            );
+            assert!(
+                args.iter().any(|a| a == "-color_trc:v:0"),
+                "{accel:?} missing color_trc override"
+            );
+            assert!(
+                args.iter().any(|a| a == "-colorspace:v:0"),
+                "{accel:?} missing colorspace override"
+            );
+            assert!(
+                args.iter().any(|a| a == "-color_range:v:0"),
+                "{accel:?} missing color_range override"
+            );
+            assert!(
+                args.iter().filter(|a| *a == "bt709").count() >= 3,
+                "{accel:?} should pin bt709 on three of the four tags"
+            );
+        }
+    }
+
+    #[test]
+    fn abr_video_encoder_args_skip_color_overrides_without_tonemapping() {
+        // When tonemap is off, the source's color tags should flow
+        // through untouched — SDR sources stay SDR, and an HDR source
+        // played without tonemap (operator override) stays tagged HDR
+        // so downstream HDR-capable clients render it correctly.
+        let rendition = &crate::ABR_LADDER[0];
+        let tonemap = TonemapConfig::default();
+        for accel in [
+            HwAccel::Cpu,
+            HwAccel::Nvenc,
+            HwAccel::Qsv,
+            HwAccel::Vaapi,
+            HwAccel::VideoToolbox,
+        ] {
+            let args = accel.abr_video_encoder_args(0, rendition, tonemap);
+            assert!(
+                !args.iter().any(|a| a.starts_with("-color_primaries")),
+                "{accel:?} must not override color tags when tonemap is off"
+            );
+            assert!(
+                !args.iter().any(|a| a.starts_with("-color_trc")),
+                "{accel:?} must not override color tags when tonemap is off"
+            );
+            assert!(
+                !args.iter().any(|a| a.starts_with("-colorspace")),
+                "{accel:?} must not override color tags when tonemap is off"
+            );
+            assert!(
+                !args.iter().any(|a| a.starts_with("-color_range")),
+                "{accel:?} must not override color tags when tonemap is off"
+            );
+        }
     }
 }

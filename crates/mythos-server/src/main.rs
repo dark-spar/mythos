@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use axum::Router;
 use mythos_api::{CookieConfig, HlsHandle, PostersDir, ScanTracker, SubtitlesDir, TmdbHandle};
 use mythos_auth::TokenConfig;
-use mythos_stream::{TranscodeManager, probe_hw_tonemap_support, resolve_hwaccel};
+use mythos_stream::{TranscodeManager, probe_tonemap_support, resolve_hwaccel};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -76,20 +76,17 @@ async fn main() -> Result<()> {
         ffmpeg = accel.h264_encoder(),
         "hardware encoder resolved"
     );
-    // Probe whether ffmpeg has the GPU tonemap filter for the
-    // active encoder. Many distro packages ship without
-    // `tonemap_cuda`; rather than 504-ing on every HDR play, we
-    // detect that here and downgrade `pipeline=hardware` requests
-    // to the CPU path silently at request time.
-    let hw_tonemap_available = probe_hw_tonemap_support(accel).await;
-    info!(
-        encoder = accel.as_str(),
-        hw_tonemap_available, "hw tonemap support probed"
-    );
+    // Probe which HW tonemap filters ffmpeg has compiled in
+    // (`tonemap_vaapi` / `tonemap_opencl` / `tonemap_cuda`). Many
+    // distro packages ship without one or more of these; rather
+    // than 504-ing on every HDR play, we detect at startup and let
+    // the HLS handler downgrade an operator's pick to the Software
+    // chain at request time.
+    let tonemap_support = probe_tonemap_support().await;
     let hls = HlsHandle(Some(TranscodeManager::new(
         transcode_dir,
         accel,
-        hw_tonemap_available,
+        tonemap_support,
     )));
 
     // Periodic reaper for idle transcode sessions. Runs every minute,

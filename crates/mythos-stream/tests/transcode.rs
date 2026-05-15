@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use mythos_core::{PlaybackMode, ffmpeg_bin};
 use mythos_stream::{
-    ABR_LADDER, ItemKind, SessionKey, TonemapConfig, TranscodeManager, wait_for_file,
+    ABR_LADDER, ItemKind, SessionKey, TonemapConfig, TonemapSupport, TranscodeManager,
+    wait_for_file,
 };
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -75,7 +76,7 @@ async fn ensure_session_produces_first_segment() {
     let manager = TranscodeManager::new(
         work_dir.path().to_path_buf(),
         mythos_stream::HwAccel::Cpu,
-        true,
+        TonemapSupport::default(),
     );
     let session = manager
         .ensure_session_for_segment(
@@ -103,7 +104,7 @@ async fn same_segment_reuses_existing_session() {
     let manager = TranscodeManager::new(
         work_dir.path().to_path_buf(),
         mythos_stream::HwAccel::Cpu,
-        true,
+        TonemapSupport::default(),
     );
 
     let first = manager
@@ -149,7 +150,7 @@ async fn segment_before_session_start_forces_restart() {
     let manager = TranscodeManager::new(
         work_dir.path().to_path_buf(),
         mythos_stream::HwAccel::Cpu,
-        true,
+        TonemapSupport::default(),
     );
 
     let first = manager
@@ -219,7 +220,7 @@ async fn local_segment_path_maps_global_index_to_session_local() {
     let manager = TranscodeManager::new(
         work_dir.path().to_path_buf(),
         mythos_stream::HwAccel::Cpu,
-        true,
+        TonemapSupport::default(),
     );
 
     let session = manager
@@ -252,7 +253,7 @@ async fn stop_removes_session_and_cleans_workdir() {
     let manager = TranscodeManager::new(
         work_dir.path().to_path_buf(),
         mythos_stream::HwAccel::Cpu,
-        true,
+        TonemapSupport::default(),
     );
 
     let session = manager

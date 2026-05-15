@@ -12,7 +12,7 @@ use axum::extract::State;
 use mythos_auth::AdminUser;
 use mythos_db::SettingsRepo;
 use mythos_db::settings::keys as setting_keys;
-use mythos_stream::{TonemapAlgorithm, TonemapPipeline};
+use mythos_stream::{HwAccel, TonemapAlgorithm, TonemapPipeline, TonemapSupport};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
@@ -35,17 +35,34 @@ pub struct TonemapSettings {
     /// Lowercase algorithm slug — `hable` / `mobius` / `reinhard` /
     /// `bt2390`. Matches [`mythos_stream::TonemapAlgorithm::as_str`].
     pub algorithm: String,
-    /// `hardware` or `software`. Matches
-    /// [`mythos_stream::TonemapPipeline::as_str`].
+    /// Operator's stored pipeline pick — `software` / `vaapi` /
+    /// `opencl` / `cuda`. Matches
+    /// [`mythos_stream::TonemapPipeline::as_str`]. The HLS handler
+    /// coerces invalid picks down to `software` at request time
+    /// without rewriting this value.
     pub pipeline: String,
-    /// `false` when the active ffmpeg build doesn't include the
-    /// GPU tonemap filter for the active encoder
-    /// (`tonemap_cuda` / `tonemap_vaapi`). The HLS handler
-    /// auto-downgrades to the Software pipeline in that case; the
-    /// UI uses this to surface "Hardware unavailable — falling
-    /// back to Software" rather than letting the operator wonder
-    /// why their CPU is still pinned.
-    pub hardware_supported: bool,
+    /// Slug of the active hardware encoder (`vaapi` / `nvenc` /
+    /// `qsv` / `videotoolbox` / `cpu`). The UI uses this to decide
+    /// which pipeline radio options to render — e.g. `cuda` is
+    /// only offered on NVENC, `vaapi`/`opencl` only on VAAPI.
+    pub encoder: String,
+    /// Pipelines that make sense for the active encoder, paired
+    /// with whether this ffmpeg build can actually run each one.
+    /// The UI renders an "(unavailable)" hint on any entry where
+    /// `available = false` so the operator knows why a GPU option
+    /// is greyed out (e.g. `tonemap_opencl` requires
+    /// `intel-compute-runtime`).
+    pub pipeline_options: Vec<PipelineOption>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PipelineOption {
+    /// One of the [`mythos_stream::TonemapPipeline`] slugs.
+    pub value: String,
+    /// `false` when the named filter isn't compiled into the active
+    /// ffmpeg. `Software` is always `true` (it's the CPU chain and
+    /// has no external dependency).
+    pub available: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -83,8 +100,9 @@ pub struct SettingsUpdate {
     /// Tonemap operator. Unknown values are coerced to the default
     /// (Hable) on the way in.
     pub tonemap_algorithm: Option<String>,
-    /// Tonemap pipeline — `hardware` or `software`. Unknown values
-    /// are coerced to `hardware` on the way in.
+    /// Tonemap pipeline — `software` / `vaapi` / `opencl` / `cuda`.
+    /// Unknown values (including the legacy `hardware`) coerce to
+    /// `software` on the way in.
     pub tonemap_pipeline: Option<String>,
 }
 
@@ -134,11 +152,21 @@ pub async fn get_settings(
         .map(TonemapPipeline::from_str_or_default)
         .unwrap_or_default();
 
-    let hardware_supported = hls
+    // Manager-less mode (transcoding disabled) reports CPU as the
+    // active encoder and only the Software pipeline as valid, so the
+    // admin UI doesn't offer HW options that wouldn't run anyway.
+    let (active_accel, support) = hls
         .0
         .as_ref()
-        .map(|m| m.hw_tonemap_available())
-        .unwrap_or(false);
+        .map(|m| (m.hwaccel(), m.tonemap_support()))
+        .unwrap_or((HwAccel::Cpu, TonemapSupport::default()));
+    let pipeline_options = TonemapSupport::valid_for(active_accel)
+        .iter()
+        .map(|p| PipelineOption {
+            value: p.as_str().to_string(),
+            available: support.supports(*p),
+        })
+        .collect();
 
     Ok(Json(SettingsResponse {
         tmdb: TmdbSettings {
@@ -150,7 +178,8 @@ pub async fn get_settings(
             enabled: tonemap_enabled,
             algorithm: tonemap_algorithm.as_str().to_string(),
             pipeline: tonemap_pipeline.as_str().to_string(),
-            hardware_supported,
+            encoder: active_accel.as_str().to_string(),
+            pipeline_options,
         },
     }))
 }

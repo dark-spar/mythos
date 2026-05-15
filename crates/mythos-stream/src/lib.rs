@@ -14,8 +14,8 @@ pub use abr::{
     source_rendition,
 };
 pub use hwaccel::{
-    HwAccel, TonemapAlgorithm, TonemapConfig, TonemapPipeline, probe_hw_tonemap_support,
-    resolve as resolve_hwaccel,
+    HwAccel, TonemapAlgorithm, TonemapConfig, TonemapPipeline, TonemapSupport,
+    probe_tonemap_support, resolve as resolve_hwaccel,
 };
 pub use transcode::{
     ItemKind, SEGMENT_DURATION_SECS, SEGMENT_WAIT_TIMEOUT, SessionKey, TranscodeError,

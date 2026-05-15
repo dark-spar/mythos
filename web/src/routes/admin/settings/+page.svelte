@@ -7,7 +7,6 @@
 		getSettings,
 		updateSettings,
 		TONEMAP_ALGORITHMS,
-		TONEMAP_PIPELINES,
 		type Settings,
 		type TonemapAlgorithm,
 		type TonemapPipeline
@@ -25,7 +24,7 @@
 
 	let tonemapEnabledInput = $state(true);
 	let tonemapAlgorithmInput = $state<TonemapAlgorithm>('hable');
-	let tonemapPipelineInput = $state<TonemapPipeline>('hardware');
+	let tonemapPipelineInput = $state<TonemapPipeline>('software');
 	let savingTonemap = $state(false);
 	let tonemapError = $state<string | null>(null);
 	let tonemapOk = $state(false);
@@ -91,10 +90,27 @@
 
 	function tonemapPipelineLabel(p: TonemapPipeline): string {
 		switch (p) {
-			case 'hardware':
-				return 'Hardware (GPU — default)';
 			case 'software':
-				return 'Software (CPU — portable, expensive)';
+				return 'Software — CPU zscale + tonemap (portable, slow)';
+			case 'vaapi':
+				return 'VAAPI — tonemap_vaapi (driver picks curve)';
+			case 'opencl':
+				return 'OpenCL — tonemap_opencl via VAAPI↔OpenCL interop';
+			case 'cuda':
+				return 'CUDA — tonemap_cuda on NVENC';
+		}
+	}
+
+	function tonemapPipelineHint(p: TonemapPipeline): string {
+		switch (p) {
+			case 'software':
+				return 'Always works, but a 4K HDR transcode saturates several CPU cores. The safe default.';
+			case 'vaapi':
+				return 'Zero CPU cost, but the driver picks the curve so your algorithm choice below is ignored. Known to crush blacks on Intel iHD — prefer OpenCL on Intel.';
+			case 'opencl':
+				return 'Best quality on Intel iGPU. Needs intel-compute-runtime (or the AMD equivalent) and an ffmpeg build with tonemap_opencl.';
+			case 'cuda':
+				return 'Zero CPU cost, algorithm-respecting. Needs an ffmpeg build with CUDA tonemap support compiled in.';
 		}
 	}
 
@@ -238,9 +254,9 @@
 			<h2 class="text-sm font-medium tracking-wide text-zinc-500 uppercase">HDR tonemapping</h2>
 			<p class="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
 				Maps HDR sources (HDR10 / Dolby Vision base layer / HLG) down to SDR when transcoding for
-				clients that can't display HDR. Off makes HDR content look washed out; on either uses the
-				GPU (cheap) or the CPU (heavy but portable) — see Pipeline. SDR transcodes are unaffected
-				either way.
+				clients that can't display HDR. Off makes HDR content look washed out; on, you pick which
+				filter does the work (CPU, VAAPI, OpenCL, or CUDA — depends on your encoder and ffmpeg
+				build). SDR transcodes are unaffected either way.
 			</p>
 
 			<form onsubmit={saveTonemap} class="mt-6 flex flex-col gap-4">
@@ -253,32 +269,49 @@
 					<span class="text-zinc-900 dark:text-zinc-100">Enable HDR→SDR tonemapping</span>
 				</label>
 
-				<label class="flex flex-col gap-2 text-sm">
-					<span class="font-medium text-zinc-700 dark:text-zinc-300">Pipeline</span>
-					<select
-						bind:value={tonemapPipelineInput}
-						disabled={!tonemapEnabledInput}
-						class="w-full max-w-sm rounded border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
-					>
-						{#each TONEMAP_PIPELINES as p (p)}
-							<option value={p}>{tonemapPipelineLabel(p)}</option>
-						{/each}
-					</select>
-					<span class="text-xs text-zinc-500 dark:text-zinc-400">
-						Hardware uses <code class="font-mono">tonemap_cuda</code> on NVENC or
-						<code class="font-mono">tonemap_vaapi</code> on VAAPI. If your ffmpeg build doesn't include
-						those filters, switch to Software.
-					</span>
-					{#if tonemapPipelineInput === 'hardware' && settings.tonemap.hardware_supported === false}
+				<fieldset class="flex flex-col gap-3 text-sm" disabled={!tonemapEnabledInput}>
+					<legend class="font-medium text-zinc-700 dark:text-zinc-300">
+						Pipeline
+						<span class="ml-2 text-xs font-normal text-zinc-500">
+							(active encoder: <code class="font-mono">{settings.tonemap.encoder}</code>)
+						</span>
+					</legend>
+					{#each settings.tonemap.pipeline_options as opt (opt.value)}
+						<label
+							class="flex items-start gap-3 rounded border border-zinc-200 p-3 text-sm has-[:checked]:border-zinc-900 has-[:disabled]:opacity-50 dark:border-zinc-800 dark:has-[:checked]:border-zinc-100"
+						>
+							<input
+								type="radio"
+								name="tonemap-pipeline"
+								value={opt.value}
+								bind:group={tonemapPipelineInput}
+								disabled={!opt.available || !tonemapEnabledInput}
+								class="mt-1 h-4 w-4"
+							/>
+							<span class="flex flex-col gap-1">
+								<span class="font-medium text-zinc-900 dark:text-zinc-100">
+									{tonemapPipelineLabel(opt.value)}
+									{#if !opt.available}
+										<span class="ml-2 text-xs font-normal text-amber-600 dark:text-amber-400"
+											>(unavailable in this ffmpeg build)</span
+										>
+									{/if}
+								</span>
+								<span class="text-xs text-zinc-500 dark:text-zinc-400">
+									{tonemapPipelineHint(opt.value)}
+								</span>
+							</span>
+						</label>
+					{/each}
+					{#if !settings.tonemap.pipeline_options.some((o) => o.value === tonemapPipelineInput && o.available)}
 						<div
 							class="rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200"
 						>
-							Your ffmpeg build doesn't include the GPU tonemap filter for the active encoder.
-							Hardware sessions automatically fall back to Software until ffmpeg with the filter
-							compiled in is installed.
+							Your saved pipeline isn't valid for the active encoder or isn't compiled into this
+							ffmpeg. The server is using Software for HDR sessions until you re-pick.
 						</div>
 					{/if}
-				</label>
+				</fieldset>
 
 				<label class="flex flex-col gap-2 text-sm">
 					<span class="font-medium text-zinc-700 dark:text-zinc-300">Algorithm</span>
@@ -291,10 +324,10 @@
 							<option value={algo}>{tonemapAlgorithmLabel(algo)}</option>
 						{/each}
 					</select>
-					{#if tonemapPipelineInput === 'hardware'}
+					{#if tonemapPipelineInput === 'vaapi'}
 						<span class="text-xs text-zinc-500 dark:text-zinc-400">
-							Ignored on VAAPI — the driver picks the curve. Honoured on NVENC and on the Software
-							pipeline.
+							Ignored on the VAAPI pipeline — <code class="font-mono">tonemap_vaapi</code> has no algorithm
+							option, the driver picks. Switch to OpenCL or Software to control the curve.
 						</span>
 					{/if}
 				</label>

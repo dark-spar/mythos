@@ -17,7 +17,7 @@ use mythos_api::{
 };
 use mythos_auth::TokenConfig;
 use mythos_core::ffmpeg_bin;
-use mythos_stream::TranscodeManager;
+use mythos_stream::{TonemapSupport, TranscodeManager};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 use tempfile::TempDir;
@@ -35,7 +35,7 @@ async fn setup() -> (Router, SqlitePool, TempDir) {
     let manager = TranscodeManager::new(
         transcode_dir.path().to_path_buf(),
         mythos_stream::HwAccel::Cpu,
-        true,
+        TonemapSupport::default(),
     );
     let router = mythos_api::router(ApiState {
         db: pool.clone(),

@@ -38,7 +38,7 @@ use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::abr::{Rendition, is_known_variant};
-use crate::hwaccel::{HwAccel, TonemapConfig};
+use crate::hwaccel::{HwAccel, TonemapConfig, TonemapSupport};
 
 /// Target HLS segment duration in seconds. Anything that builds the
 /// synthetic playlist must use this same constant or the playlist's
@@ -228,22 +228,24 @@ struct ManagerInner {
     work_root: PathBuf,
     sessions: RwLock<HashMap<SessionKey, Arc<TranscodeSession>>>,
     accel: HwAccel,
-    /// Whether the active ffmpeg has the GPU tonemap filter for
-    /// `accel` compiled in. False on common distro ffmpegs that
-    /// ship without `tonemap_cuda` etc. The HLS handler reads this
-    /// to silently downgrade `TonemapPipeline::Hardware` to
-    /// `Software` when the filter isn't available.
-    hw_tonemap_available: bool,
+    /// Which HW tonemap filters the active ffmpeg actually has
+    /// compiled in. Probed once at startup. The HLS handler reads
+    /// this to silently downgrade an operator-selected
+    /// [`crate::TonemapPipeline`] to [`crate::TonemapPipeline::Software`]
+    /// when the named filter is missing, without rewriting the
+    /// stored row (so a later ffmpeg upgrade restores the original
+    /// intent).
+    tonemap_support: TonemapSupport,
 }
 
 impl TranscodeManager {
-    pub fn new(work_root: PathBuf, accel: HwAccel, hw_tonemap_available: bool) -> Self {
+    pub fn new(work_root: PathBuf, accel: HwAccel, tonemap_support: TonemapSupport) -> Self {
         Self {
             inner: Arc::new(ManagerInner {
                 work_root,
                 sessions: RwLock::new(HashMap::new()),
                 accel,
-                hw_tonemap_available,
+                tonemap_support,
             }),
         }
     }
@@ -252,13 +254,12 @@ impl TranscodeManager {
         self.inner.accel
     }
 
-    /// Whether `TonemapPipeline::Hardware` can actually be honoured
-    /// on this server. False when the chosen encoder has no GPU
-    /// tonemap filter or when ffmpeg's build doesn't include it; in
-    /// either case `Hardware` requests should be quietly downgraded
-    /// to `Software`.
-    pub fn hw_tonemap_available(&self) -> bool {
-        self.inner.hw_tonemap_available
+    /// Which HW tonemap filters this server actually has available.
+    /// The HLS handler combines this with the operator's chosen
+    /// pipeline to decide whether to honour the request or downgrade
+    /// to [`crate::TonemapPipeline::Software`].
+    pub fn tonemap_support(&self) -> TonemapSupport {
+        self.inner.tonemap_support
     }
 
     /// Return a session that's either currently transcoding segment
@@ -539,7 +540,7 @@ async fn launch_ffmpeg(
         // HW decode flags only matter when we're going to re-encode.
         // For `-c:v copy`, the bitstream passes through and we want
         // to avoid forcing the GPU pipeline.
-        cmd.args(accel.decode_args());
+        cmd.args(accel.decode_args(tonemap.pipeline));
     }
     // PGS subtitle events frequently lack a duration ("show until
     // next event"); -fix_sub_duration fills those in so overlay

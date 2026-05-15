@@ -11,9 +11,18 @@ export const TONEMAP_ALGORITHMS: readonly TonemapAlgorithm[] = [
 	'bt2390'
 ] as const;
 
-export type TonemapPipeline = 'hardware' | 'software';
+export type TonemapPipeline = 'software' | 'vaapi' | 'opencl' | 'cuda';
 
-export const TONEMAP_PIPELINES: readonly TonemapPipeline[] = ['hardware', 'software'] as const;
+export type Encoder = 'cpu' | 'qsv' | 'vaapi' | 'nvenc' | 'videotoolbox';
+
+export interface PipelineOption {
+	value: TonemapPipeline;
+	/// `false` when the named filter isn't compiled into the
+	/// server's ffmpeg. The radio button is rendered disabled with
+	/// an "(unavailable)" hint so the operator knows why a GPU
+	/// option is greyed out.
+	available: boolean;
+}
 
 export interface Settings {
 	tmdb: {
@@ -28,12 +37,11 @@ export interface Settings {
 		enabled: boolean;
 		algorithm: TonemapAlgorithm;
 		pipeline: TonemapPipeline;
-		/// `false` when the server's ffmpeg doesn't have the GPU
-		/// tonemap filter for the active encoder. The backend
-		/// silently falls back to the Software pipeline; the UI
-		/// uses this flag to surface why "Hardware" isn't taking
-		/// effect.
-		hardware_supported: boolean;
+		/// Active encoder slug — drives which pipelines we render.
+		encoder: Encoder;
+		/// Pipelines valid for `encoder`, paired with build
+		/// availability. Always at least `software`.
+		pipeline_options: PipelineOption[];
 	};
 }
 

@@ -31,7 +31,7 @@ crates/
   mythos-scan     filesystem walker (jwalk) + ffprobe identifier
   mythos-meta     TMDb client w/ on-disk poster cache (MusicBrainz/OpenLibrary later)
   mythos-stream   FFmpeg HLS transcoder, ABR ladder, hwaccel probe, subtitle burn-in
-migrations/       SQL files run by sqlx::migrate! (0001–0007 so far)
+migrations/       SQL files run by sqlx::migrate! (0001–0009 so far)
 web/              SvelteKit 2 + Svelte 5 + TS + Tailwind v4 + Vidstack + hls.js
 ```
 
@@ -111,13 +111,24 @@ Track which phase we're in; don't pull work forward without a reason.
     `Player.svelte` + `lib/player/playback.ts` so `/movie/[id]` and the new
     `/episodes/[id]` page run on the same component; previous/next episode
     navigation via `EpisodeRepo::find_neighbors`.
-  - NEXT: music / photos / books (separate sub-phases), continue-watching
-    aggregation across movies + episodes, auto-play-next at episode end.
+  - 3d (done): Continue-watching aggregated across movies + episodes via
+    `GET /api/users/me/continue-watching`; auto-play-next at episode end via
+    a countdown card in `Player.svelte` that navigates with
+    `state: { autoplay: true }` so consecutive episodes play seamlessly while
+    keeping "click thumbnail = paused" as the default for manual navigation.
+  - NEXT: music / photos / books (separate sub-phases).
 - **Phase 4 — HLS transcoding (done).** FFmpeg subprocess manager,
   segmented HLS, seek-by-restart.
-- **Phase 5 — profiles + ABR + hwaccel (done through 5d).** Hardware probe
-  (NVENC / QSV / VAAPI / VideoToolbox), multi-rendition ABR ladder, subtitle
-  burn-in + WebVTT sidecar, client-declared profile + transcode taxonomy.
+- **Phase 5 — profiles + ABR + hwaccel (done through 5d, plus HDR follow-on).**
+  Hardware probe (NVENC / QSV / VAAPI / VideoToolbox), multi-rendition ABR
+  ladder, subtitle burn-in + WebVTT sidecar, client-declared profile +
+  transcode taxonomy. HDR→SDR tonemapping shipped on top: admin-configurable
+  `TonemapPipeline` (software / vaapi / opencl / cuda) probed at startup and
+  silently downgraded to software when the chosen filter isn't compiled in;
+  NVENC pipeline keeps decode→scale→encode on the GPU end-to-end via NVDEC +
+  `scale_cuda`; `media_files.color_{primaries,transfer,space}` (migration 0009)
+  feeds the tonemap decision and self-heals NULL rows by ffprobing on first
+  HDR play (`mythos_api::hls::resolve_color_transfer`).
 - **Phase 6 — Jellyfin compatibility shim.** Translation layer at `/jellyfin/*`
   for Findroid / Swiftfin / jellyfin-web.
 
@@ -146,3 +157,8 @@ The full plan with rationale and verification steps lives at
 - **HLS sessions are torn down on player teardown** (`DELETE /api/movies/:id/hls`).
   Don't leak ffmpeg subprocesses — route any new transcode entry point through
   `TranscodeManager` so the lifecycle stays centralized.
+- **ffmpeg / ffprobe binary resolution** lives in `mythos_core::ffmpeg` and is
+  re-evaluated per spawn. Operators set `MYTHOS_FFMPEG_BIN` /
+  `MYTHOS_FFPROBE_BIN` to point at e.g. `jellyfin-ffmpeg` (which ships HW
+  filters not always in distro ffmpeg — notably the `tonemap_*` family). Spawn
+  via these helpers, not hard-coded `"ffmpeg"` / `"ffprobe"` strings.

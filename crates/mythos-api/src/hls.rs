@@ -486,8 +486,12 @@ pub(crate) async fn resolve_input_path_for_file(
 /// HDR is detected from the source's `color_transfer` column
 /// (`smpte2084` = HDR10 PQ, `arib-std-b67` = HLG); anything else
 /// means an SDR source where tonemapping would be a no-op or worse.
-/// The admin setting acts as a global on/off so an operator can
-/// disable the curve if it doesn't look right on their content.
+/// When the column is `NULL` (row pre-dates migration 0009, scanner
+/// failed, etc.) [`resolve_color_transfer`] ffprobes the file once
+/// and writes the result back so this session and the next don't
+/// pay the probe again. The admin setting acts as a global on/off
+/// so an operator can disable the curve if it doesn't look right on
+/// their content.
 ///
 /// The stored [`TonemapPipeline`] is coerced down to
 /// [`TonemapPipeline::Software`] under two conditions:
@@ -510,17 +514,9 @@ async fn resolve_tonemap_config(
     accel: HwAccel,
     support: TonemapSupport,
 ) -> ApiResult<TonemapConfig> {
-    let transfer: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT color_transfer FROM media_files WHERE id = ?")
-            .bind(file_id.to_string())
-            .fetch_optional(pool)
-            .await
-            .map_err(|err| {
-                tracing::error!(?err, "color_transfer lookup failed");
-                ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal")
-            })?;
+    let color_transfer = resolve_color_transfer(pool, file_id).await;
     let is_hdr_source = matches!(
-        transfer.and_then(|(t,)| t).as_deref(),
+        color_transfer.as_deref(),
         Some("smpte2084" | "arib-std-b67")
     );
 
@@ -560,6 +556,86 @@ async fn resolve_tonemap_config(
         algorithm,
         pipeline,
     })
+}
+
+/// Best-effort lookup of a file's `color_transfer` for the HDR check.
+///
+/// Three cases:
+/// - Row exists and the column has a value → return it.
+/// - Row exists but the column is `NULL` (typical for installs that
+///   were scanned before migration 0009 added the color columns) →
+///   ffprobe the file on-the-fly, write the result back into the row,
+///   and return it. Self-heals stale rows transparently; the next play
+///   pays nothing extra.
+/// - Row doesn't exist, the file is gone, or ffprobe fails → return
+///   `None`. The caller treats `None` as SDR, which is the safe choice
+///   (no tonemap applied; SDR sources go through unchanged, HDR
+///   sources look washed out but don't crash the session).
+///
+/// All failures log at `warn` but don't propagate — the call is a hot
+/// path on every HLS request and we don't want a transient probe
+/// failure to 500 an otherwise valid play.
+async fn resolve_color_transfer(pool: &SqlitePool, file_id: Uuid) -> Option<String> {
+    let stored: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT color_transfer FROM media_files WHERE id = ?")
+            .bind(file_id.to_string())
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    match stored {
+        Some((Some(transfer),)) => Some(transfer),
+        Some((None,)) => probe_and_persist_color(pool, file_id).await,
+        None => None,
+    }
+}
+
+/// On-demand ffprobe path used by [`resolve_color_transfer`] when the
+/// DB row has `color_transfer IS NULL`. Probes the file, persists all
+/// three color columns (primaries / transfer / space) back so the
+/// scanner doesn't need to re-run, and returns the transfer so the
+/// caller can decide whether to tonemap.
+///
+/// Adds one ffprobe per *file* per *upgrade* — roughly 50–200ms once
+/// per HDR file ever played on a pre-0009 install, then nothing. The
+/// write-back is a single-row UPDATE so we don't compete with scanner
+/// transactions; on the off chance it loses a race with a scanner
+/// rewriting the same row, both writes end up with the same values.
+async fn probe_and_persist_color(pool: &SqlitePool, file_id: Uuid) -> Option<String> {
+    let path = match resolve_input_path_for_file(pool, file_id).await {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::warn!(?err, %file_id, "on-demand color probe: couldn't resolve path");
+            return None;
+        }
+    };
+    let probe = match mythos_scan::probe(&path).await {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::warn!(?err, %file_id, "on-demand color probe failed; treating as SDR");
+            return None;
+        }
+    };
+    let res = sqlx::query(
+        "UPDATE media_files \
+         SET color_primaries = ?, color_transfer = ?, color_space = ? \
+         WHERE id = ?",
+    )
+    .bind(&probe.color_primaries)
+    .bind(&probe.color_transfer)
+    .bind(&probe.color_space)
+    .bind(file_id.to_string())
+    .execute(pool)
+    .await;
+    match res {
+        Ok(_) => tracing::info!(
+            %file_id,
+            color_transfer = ?probe.color_transfer,
+            "on-demand color probe persisted"
+        ),
+        Err(err) => tracing::warn!(?err, %file_id, "on-demand color probe write-back failed"),
+    }
+    probe.color_transfer
 }
 
 async fn file_duration_seconds(pool: &SqlitePool, file_id: Uuid) -> ApiResult<f64> {
@@ -650,5 +726,145 @@ fn map_transcode_error(err: TranscodeError) -> ApiError {
             tracing::error!(?io, "transcode io error");
             ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    /// Generate a tiny mp4 with explicit bt709 color tags so the
+    /// on-demand probe has deterministic metadata to read. Two layers
+    /// are required: `setparams` seeds frame-side tags on the lavfi
+    /// source (libx264 only writes SPS color tags when the input
+    /// frames carry them), and the matching `-color_*` flags on the
+    /// encoder pass them through to the container's stream metadata.
+    /// Without setparams, libx264 quietly leaves transfer/primaries
+    /// blank in the SPS even when the encoder flags ask for bt709.
+    fn ffmpeg_test_input(dir: &std::path::Path) -> std::path::PathBuf {
+        let path = dir.join("input.mp4");
+        let status = Command::new(mythos_core::ffmpeg_bin())
+            .args([
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=red:size=160x90:duration=0.5:rate=10",
+                "-vf",
+                "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709,format=yuv420p",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-color_primaries",
+                "bt709",
+                "-color_trc",
+                "bt709",
+                "-colorspace",
+                "bt709",
+            ])
+            .arg(&path)
+            .status()
+            .expect("ffmpeg on PATH");
+        assert!(status.success());
+        path
+    }
+
+    async fn seed_file_with_null_color(pool: &SqlitePool, dir: &std::path::Path) -> Uuid {
+        let library_id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO libraries (id, name, kind, root_path) VALUES (?, 'test', 'movies', ?)",
+        )
+        .bind(library_id.to_string())
+        .bind(dir.to_str().unwrap())
+        .execute(pool)
+        .await
+        .unwrap();
+        let file_id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO media_files (id, library_id, path, size_bytes, mtime) \
+             VALUES (?, ?, 'input.mp4', 0, '2026-01-01T00:00:00.000Z')",
+        )
+        .bind(file_id.to_string())
+        .bind(library_id.to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+        file_id
+    }
+
+    /// The core durable-fix promise: a pre-0009 row with
+    /// `color_transfer IS NULL` self-heals on first request, the DB is
+    /// updated, and a second call returns the same value without
+    /// re-probing.
+    #[tokio::test]
+    async fn resolve_color_transfer_probes_persists_and_caches() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("../../migrations").run(&pool).await.unwrap();
+        let dir = TempDir::new().unwrap();
+        ffmpeg_test_input(dir.path());
+        let file_id = seed_file_with_null_color(&pool, dir.path()).await;
+
+        // Before: column is NULL.
+        let (before,): (Option<String>,) =
+            sqlx::query_as("SELECT color_transfer FROM media_files WHERE id = ?")
+                .bind(file_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(before.is_none());
+
+        // First call: probes the file, persists, returns the value.
+        // Our fixture explicitly tags the stream as bt709 so we can
+        // assert on the exact value — looser `is_some()` would hide a
+        // bug where the probe parsed but mis-extracted the field.
+        let first = resolve_color_transfer(&pool, file_id).await;
+        assert_eq!(first.as_deref(), Some("bt709"));
+
+        // The persist must actually write — otherwise every subsequent
+        // play re-probes, defeating the cache.
+        let (after,): (Option<String>,) =
+            sqlx::query_as("SELECT color_transfer FROM media_files WHERE id = ?")
+                .bind(file_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(after, first, "stored value must match what we returned");
+
+        // Second call: hits the fast path (stored value present), no
+        // probe. We assert equality with `first` — same value, no
+        // accidental drift from a stray probe.
+        let second = resolve_color_transfer(&pool, file_id).await;
+        assert_eq!(second, first);
+    }
+
+    /// Missing file: the probe fails; the function returns None
+    /// rather than 500-ing the HLS request. SDR fall-through is the
+    /// safe behaviour.
+    #[tokio::test]
+    async fn resolve_color_transfer_returns_none_when_file_missing() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("../../migrations").run(&pool).await.unwrap();
+        let dir = TempDir::new().unwrap();
+        // Note: we don't create the file on disk — only the DB row.
+        let file_id = seed_file_with_null_color(&pool, dir.path()).await;
+
+        let result = resolve_color_transfer(&pool, file_id).await;
+        assert!(result.is_none());
+    }
+
+    /// Row missing entirely (file_id from another universe): None,
+    /// no panic.
+    #[tokio::test]
+    async fn resolve_color_transfer_returns_none_when_row_missing() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("../../migrations").run(&pool).await.unwrap();
+
+        let result = resolve_color_transfer(&pool, Uuid::now_v7()).await;
+        assert!(result.is_none());
     }
 }

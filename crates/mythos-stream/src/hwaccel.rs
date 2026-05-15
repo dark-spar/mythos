@@ -33,10 +33,11 @@ use tracing::{debug, info, warn};
 use crate::abr::Rendition;
 
 /// Tonemap operator chosen by the operator from the admin settings.
-/// All four are CPU `tonemap` filter modes — we deliberately do **not**
-/// expose libplacebo / `tonemap_vaapi` here. The HW-accel pipelines
-/// `hwdownload` to system memory, run the same CPU chain, then
-/// `hwupload` so the encoder still runs on the GPU.
+/// All four names map onto the CPU `tonemap` filter's `tonemap=`
+/// option and the NVENC `tonemap_cuda` filter's `tonemap=` option;
+/// VAAPI's `tonemap_vaapi` filter has no algorithm knob (the
+/// driver picks its own curve) so this selection is ignored when
+/// the active encoder is VAAPI on the Hardware pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TonemapAlgorithm {
     /// Filmic curve from John Hable's "Uncharted 2" presentation —
@@ -78,6 +79,50 @@ impl TonemapAlgorithm {
     }
 }
 
+/// Where the HDR→SDR conversion runs in the filter graph.
+///
+/// The CPU `zscale`+`tonemap` chain is high-quality but expensive —
+/// on a 4K HDR source it can saturate several cores. The hardware
+/// paths (`tonemap_cuda` for NVENC, `tonemap_vaapi` for VAAPI) keep
+/// frames in GPU memory and shed almost all of that CPU load, at the
+/// cost of being dependent on the operator's ffmpeg build and GPU
+/// drivers — some distros ship ffmpeg without CUDA tonemap support
+/// and there's no clean way to detect that ahead of time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TonemapPipeline {
+    /// HW tonemap when the active encoder supports it (NVENC,
+    /// VAAPI); CPU fallback for libx264 / QSV / VideoToolbox where
+    /// no widely-shipping HW tonemap filter exists. The default —
+    /// matches the encoder you've already picked.
+    #[default]
+    Hardware,
+    /// Force CPU tonemap regardless of encoder. Use when the GPU
+    /// path's output looks wrong (drivers vary) or when the ffmpeg
+    /// build is missing `tonemap_cuda` / `tonemap_vaapi`. Adds the
+    /// `hwdownload` → CPU chain → `hwupload` round-trip on
+    /// hardware encoders so the GPU encoder still runs.
+    Software,
+}
+
+impl TonemapPipeline {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TonemapPipeline::Hardware => "hardware",
+            TonemapPipeline::Software => "software",
+        }
+    }
+
+    /// Parse an admin-supplied pipeline name. Unknown values fall
+    /// back to [`TonemapPipeline::Hardware`] — same reason as
+    /// [`TonemapAlgorithm::from_str_or_default`].
+    pub fn from_str_or_default(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "software" | "cpu" => TonemapPipeline::Software,
+            _ => TonemapPipeline::Hardware,
+        }
+    }
+}
+
 /// Whether and how to perform HDR→SDR tonemapping inside the filter
 /// graph. Computed per-session from the admin settings + the source's
 /// detected HDR transfer.
@@ -87,6 +132,7 @@ pub struct TonemapConfig {
     /// the operator hasn't disabled tonemapping in settings.
     pub apply: bool,
     pub algorithm: TonemapAlgorithm,
+    pub pipeline: TonemapPipeline,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,19 +249,32 @@ impl HwAccel {
     /// Empty string when [`TonemapConfig::apply`] is false so the
     /// filter graph builder can paste it in unconditionally.
     ///
-    /// All accels run the same CPU `zscale`+`tonemap` chain — the
-    /// HW-accel paths just wrap it in `hwdownload`/`hwupload` so the
-    /// surface returns to GPU memory in time for `scale_cuda` /
-    /// `scale_vaapi` and the GPU encoder. That's the deliberate
-    /// trade-off chosen at design time: a brief round-trip to system
-    /// memory on HDR content in exchange for not having to gate on
-    /// libplacebo / `tonemap_vaapi` build flags. SDR sources hit
-    /// `apply=false` and skip this entirely.
+    /// Two pipelines:
+    ///
+    /// - [`TonemapPipeline::Hardware`] — `tonemap_cuda` for NVENC,
+    ///   `tonemap_vaapi` for VAAPI. Frames stay on the GPU; almost
+    ///   no CPU load on top of the HW encode. Requires the operator's
+    ///   ffmpeg to have the relevant filter compiled in (most
+    ///   distro ffmpegs do for VAAPI; CUDA tonemap support varies).
+    ///
+    /// - [`TonemapPipeline::Software`] — CPU `zscale`+`tonemap`
+    ///   chain. Wrapped in `hwdownload`/`hwupload` on hardware
+    ///   encoders so the encoder still runs on the GPU; pays the
+    ///   round-trip on HDR content but is portable across ffmpeg
+    ///   builds.
+    ///
+    /// For encoders without a usable HW tonemap filter (libx264,
+    /// QSV, VideoToolbox) the pipeline choice is moot — both modes
+    /// emit the CPU chain inline.
     pub fn tonemap_prefilter(self, cfg: TonemapConfig) -> String {
         if !cfg.apply {
             return String::new();
         }
         let algo = cfg.algorithm.as_str();
+        // CPU chain — used as either the inline filter (CPU/QSV/VT)
+        // or the meat of the hwdownload→...→hwupload wrap (Software
+        // pipeline on HW encoders).
+        //
         // 1. zscale to linear light (PQ/HLG → linear).
         // 2. float pixel format — `tonemap` requires float input.
         // 3. zscale primaries BT.2020 → BT.709.
@@ -229,10 +288,50 @@ impl HwAccel {
              tonemap=tonemap={algo}:desat=0,\
              zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
         );
+        match (self, cfg.pipeline) {
+            // CPU-only encoders — no GPU to download from. Always
+            // inline.
+            (HwAccel::Cpu | HwAccel::Qsv | HwAccel::VideoToolbox, _) => cpu,
+
+            // NVENC + HW: `tonemap_cuda` keeps frames on the GPU.
+            // Matrix/primaries/transfer pinned to BT.709 so the
+            // output is correct SDR; `format=yuv420p` matches what
+            // h264_nvenc accepts (no 10-bit on H.264).
+            (HwAccel::Nvenc, TonemapPipeline::Hardware) => format!(
+                "tonemap_cuda=tonemap={algo}:desat=0:\
+                 transfer=bt709:matrix=bt709:primaries=bt709:\
+                 format=yuv420p"
+            ),
+            // NVENC + SW: round-trip through system memory.
+            (HwAccel::Nvenc, TonemapPipeline::Software) => {
+                format!("hwdownload,format=p010le,{cpu},hwupload_cuda")
+            }
+
+            // VAAPI + HW: `tonemap_vaapi` doesn't take an algorithm
+            // option — the Intel/AMD driver picks one (typically a
+            // BT.2390-ish curve). The algorithm setting is ignored
+            // on this branch; documented in the UI hint.
+            (HwAccel::Vaapi, TonemapPipeline::Hardware) => {
+                "tonemap_vaapi=format=nv12:matrix=bt709:primaries=bt709:transfer=bt709".to_string()
+            }
+            // VAAPI + SW: round-trip + nv12 before reupload because
+            // `scale_vaapi` expects nv12 surfaces downstream.
+            (HwAccel::Vaapi, TonemapPipeline::Software) => {
+                format!("hwdownload,format=p010le,{cpu},format=nv12,hwupload")
+            }
+        }
+    }
+
+    /// Name of the GPU-side HDR→SDR filter for this encoder, or
+    /// `None` if no widely-shipped HW tonemap filter exists for it.
+    /// `tonemap_cuda` for NVENC and `tonemap_vaapi` for VAAPI are
+    /// the two we use; everything else falls back to CPU regardless
+    /// of pipeline.
+    pub fn hw_tonemap_filter_name(self) -> Option<&'static str> {
         match self {
-            HwAccel::Cpu | HwAccel::Qsv | HwAccel::VideoToolbox => cpu,
-            HwAccel::Nvenc => format!("hwdownload,format=p010le,{cpu},hwupload_cuda"),
-            HwAccel::Vaapi => format!("hwdownload,format=p010le,{cpu},format=nv12,hwupload"),
+            HwAccel::Nvenc => Some("tonemap_cuda"),
+            HwAccel::Vaapi => Some("tonemap_vaapi"),
+            HwAccel::Qsv | HwAccel::VideoToolbox | HwAccel::Cpu => None,
         }
     }
 
@@ -391,6 +490,90 @@ async fn auto_detect() -> HwAccel {
     HwAccel::Cpu
 }
 
+/// Does ffmpeg have the GPU tonemap filter for `accel` compiled in?
+///
+/// `tonemap_cuda` / `tonemap_vaapi` aren't part of the ffmpeg
+/// baseline — many distro packages ship without them. We probe once
+/// at startup by reading `ffmpeg -filters` so the HLS handler can
+/// downgrade `TonemapPipeline::Hardware` to `Software` silently when
+/// the chosen filter isn't available, rather than letting the
+/// transcode session 504 on every play attempt.
+///
+/// Returns `true` when:
+/// - `accel.hw_tonemap_filter_name()` is `None` (no HW tonemap was
+///   ever going to be used — vacuously fine), OR
+/// - ffmpeg's `-filters` output contains the relevant filter name.
+///
+/// Returns `false` only when there's a named GPU filter we *would*
+/// use but ffmpeg doesn't have it.
+pub async fn probe_hw_tonemap_support(accel: HwAccel) -> bool {
+    let Some(filter) = accel.hw_tonemap_filter_name() else {
+        return true;
+    };
+    match list_filters().await {
+        Ok(names) => {
+            let present = names.iter().any(|n| n == filter);
+            if !present {
+                info!(
+                    encoder = accel.as_str(),
+                    filter,
+                    "ffmpeg build is missing the GPU tonemap filter; HDR sessions \
+                     will use the CPU pipeline regardless of admin setting"
+                );
+            }
+            present
+        }
+        Err(err) => {
+            warn!(
+                ?err,
+                "couldn't list ffmpeg filters; assuming GPU tonemap is unavailable"
+            );
+            false
+        }
+    }
+}
+
+/// Parse `ffmpeg -filters` for the names it advertises. The third
+/// whitespace-separated token on each filter line is the filter name
+/// (`tonemap_cuda`, `scale_vaapi`, …).
+async fn list_filters() -> Result<Vec<String>, DetectError> {
+    let mut child = Command::new(ffmpeg_bin())
+        .arg("-hide_banner")
+        .arg("-filters")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(DetectError::NoFfmpeg)?;
+
+    let mut stdout = child.stdout.take().expect("stdout piped");
+    let mut buf = String::new();
+    stdout.read_to_string(&mut buf).await.ok();
+    let _ = child.wait().await;
+
+    let mut names = Vec::new();
+    for line in buf.lines() {
+        // Filter lines look like: " ..C tonemap_cuda     V->V    GPU …".
+        // The header section has lines like "T.. = Timeline support";
+        // those start in column 0 (no leading space) so we filter them
+        // out by requiring a leading space and skipping the marker line
+        // "  T.." marker entries (their second token is `=`).
+        let trimmed = line.trim_start();
+        if trimmed.len() < 5 || !line.starts_with(' ') {
+            continue;
+        }
+        let mut parts = trimmed.split_whitespace();
+        // First token: flags (e.g. "T.." / "..C" / "TS."). Skip it.
+        let Some(_flags) = parts.next() else { continue };
+        let Some(name) = parts.next() else { continue };
+        // Skip the legend lines whose "second token" is `=`.
+        if name == "=" {
+            continue;
+        }
+        names.push(name.to_string());
+    }
+    Ok(names)
+}
+
 /// Parse `ffmpeg -encoders` for the H.264 encoders it advertises.
 /// Returns just the encoder names (e.g. "libx264", "h264_qsv").
 async fn list_encoders() -> Result<Vec<String>, DetectError> {
@@ -540,11 +723,54 @@ mod tests {
     }
 
     #[test]
+    fn hw_tonemap_filter_name_only_set_for_nvenc_and_vaapi() {
+        assert_eq!(
+            HwAccel::Nvenc.hw_tonemap_filter_name(),
+            Some("tonemap_cuda")
+        );
+        assert_eq!(
+            HwAccel::Vaapi.hw_tonemap_filter_name(),
+            Some("tonemap_vaapi")
+        );
+        for none_accel in [HwAccel::Cpu, HwAccel::Qsv, HwAccel::VideoToolbox] {
+            assert_eq!(none_accel.hw_tonemap_filter_name(), None);
+        }
+    }
+
+    #[test]
+    fn tonemap_pipeline_parses_known_slugs() {
+        assert_eq!(
+            TonemapPipeline::from_str_or_default("software"),
+            TonemapPipeline::Software
+        );
+        assert_eq!(
+            TonemapPipeline::from_str_or_default("CPU"),
+            TonemapPipeline::Software
+        );
+        assert_eq!(
+            TonemapPipeline::from_str_or_default("hardware"),
+            TonemapPipeline::Hardware
+        );
+    }
+
+    #[test]
+    fn tonemap_pipeline_falls_back_to_hardware_on_unknown() {
+        // Default is Hardware — the whole point of this setting is
+        // that CPU tonemap was too expensive. Stale or junk values
+        // shouldn't silently flip an operator back onto the CPU.
+        assert_eq!(
+            TonemapPipeline::from_str_or_default(""),
+            TonemapPipeline::Hardware
+        );
+        assert_eq!(
+            TonemapPipeline::from_str_or_default("definitely-not-a-pipeline"),
+            TonemapPipeline::Hardware
+        );
+    }
+
+    #[test]
     fn tonemap_prefilter_is_empty_when_disabled() {
-        let cfg = TonemapConfig {
-            apply: false,
-            algorithm: TonemapAlgorithm::Hable,
-        };
+        let cfg = TonemapConfig::default();
         for accel in [
             HwAccel::Cpu,
             HwAccel::Nvenc,
@@ -560,24 +786,47 @@ mod tests {
     }
 
     #[test]
-    fn tonemap_prefilter_cpu_chain_has_no_hw_round_trip() {
-        let chain = HwAccel::Cpu.tonemap_prefilter(TonemapConfig {
-            apply: true,
-            algorithm: TonemapAlgorithm::Hable,
-        });
-        // CPU pipeline runs the tonemap inline with no hwdownload /
-        // hwupload around it — anything else would be wasted work.
-        assert!(chain.contains("zscale=t=linear"));
-        assert!(chain.contains("tonemap=tonemap=hable"));
-        assert!(!chain.contains("hwdownload"));
-        assert!(!chain.contains("hwupload"));
+    fn tonemap_prefilter_cpu_encoder_is_inline_regardless_of_pipeline() {
+        for pipeline in [TonemapPipeline::Hardware, TonemapPipeline::Software] {
+            let chain = HwAccel::Cpu.tonemap_prefilter(TonemapConfig {
+                apply: true,
+                algorithm: TonemapAlgorithm::Hable,
+                pipeline,
+            });
+            // libx264 has no GPU surface to download from. Both
+            // pipeline choices collapse to the inline CPU chain.
+            assert!(chain.contains("zscale=t=linear"));
+            assert!(chain.contains("tonemap=tonemap=hable"));
+            assert!(!chain.contains("hwdownload"));
+            assert!(!chain.contains("hwupload"));
+        }
     }
 
     #[test]
-    fn tonemap_prefilter_nvenc_wraps_in_hwdownload_and_hwupload_cuda() {
+    fn tonemap_prefilter_nvenc_hardware_uses_tonemap_cuda() {
         let chain = HwAccel::Nvenc.tonemap_prefilter(TonemapConfig {
             apply: true,
             algorithm: TonemapAlgorithm::Bt2390,
+            pipeline: TonemapPipeline::Hardware,
+        });
+        // GPU-side tonemap: filter runs on the CUDA surface, no
+        // download to system memory.
+        assert!(chain.starts_with("tonemap_cuda"));
+        assert!(chain.contains("tonemap=bt2390"));
+        assert!(!chain.contains("hwdownload"));
+        assert!(!chain.contains("hwupload"));
+        // BT.709 output so the encoder doesn't re-flag the stream
+        // as HDR.
+        assert!(chain.contains("transfer=bt709"));
+        assert!(chain.contains("format=yuv420p"));
+    }
+
+    #[test]
+    fn tonemap_prefilter_nvenc_software_wraps_in_hwdownload_and_hwupload_cuda() {
+        let chain = HwAccel::Nvenc.tonemap_prefilter(TonemapConfig {
+            apply: true,
+            algorithm: TonemapAlgorithm::Bt2390,
+            pipeline: TonemapPipeline::Software,
         });
         assert!(chain.starts_with("hwdownload"));
         assert!(chain.contains("tonemap=tonemap=bt2390"));
@@ -585,10 +834,26 @@ mod tests {
     }
 
     #[test]
-    fn tonemap_prefilter_vaapi_lands_in_nv12_before_hwupload() {
+    fn tonemap_prefilter_vaapi_hardware_uses_tonemap_vaapi() {
         let chain = HwAccel::Vaapi.tonemap_prefilter(TonemapConfig {
             apply: true,
             algorithm: TonemapAlgorithm::Mobius,
+            pipeline: TonemapPipeline::Hardware,
+        });
+        assert!(chain.starts_with("tonemap_vaapi"));
+        assert!(chain.contains("format=nv12"));
+        // The driver picks the algorithm — our `Mobius` selection
+        // is intentionally not threaded into the filter string here.
+        assert!(!chain.contains("hwdownload"));
+        assert!(!chain.contains("hwupload"));
+    }
+
+    #[test]
+    fn tonemap_prefilter_vaapi_software_lands_in_nv12_before_hwupload() {
+        let chain = HwAccel::Vaapi.tonemap_prefilter(TonemapConfig {
+            apply: true,
+            algorithm: TonemapAlgorithm::Mobius,
+            pipeline: TonemapPipeline::Software,
         });
         assert!(chain.starts_with("hwdownload"));
         // scale_vaapi expects nv12 input — the CPU chain ends in

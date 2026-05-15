@@ -7,8 +7,10 @@
 		getSettings,
 		updateSettings,
 		TONEMAP_ALGORITHMS,
+		TONEMAP_PIPELINES,
 		type Settings,
-		type TonemapAlgorithm
+		type TonemapAlgorithm,
+		type TonemapPipeline
 	} from '$lib/settings';
 
 	let settings = $state<Settings | null>(null);
@@ -23,6 +25,7 @@
 
 	let tonemapEnabledInput = $state(true);
 	let tonemapAlgorithmInput = $state<TonemapAlgorithm>('hable');
+	let tonemapPipelineInput = $state<TonemapPipeline>('hardware');
 	let savingTonemap = $state(false);
 	let tonemapError = $state<string | null>(null);
 	let tonemapOk = $state(false);
@@ -43,6 +46,7 @@
 			tmdbInput = settings.tmdb.value ?? '';
 			tonemapEnabledInput = settings.tonemap.enabled;
 			tonemapAlgorithmInput = settings.tonemap.algorithm;
+			tonemapPipelineInput = settings.tonemap.pipeline;
 		} catch (e) {
 			loadError = e instanceof Error ? e.message : 'failed to load';
 		} finally {
@@ -58,10 +62,12 @@
 		try {
 			settings = await updateSettings({
 				tonemap_enabled: tonemapEnabledInput,
-				tonemap_algorithm: tonemapAlgorithmInput
+				tonemap_algorithm: tonemapAlgorithmInput,
+				tonemap_pipeline: tonemapPipelineInput
 			});
 			tonemapEnabledInput = settings.tonemap.enabled;
 			tonemapAlgorithmInput = settings.tonemap.algorithm;
+			tonemapPipelineInput = settings.tonemap.pipeline;
 			tonemapOk = true;
 		} catch (e) {
 			tonemapError = e instanceof Error ? e.message : 'failed to save';
@@ -80,6 +86,15 @@
 				return 'Reinhard (conservative)';
 			case 'bt2390':
 				return 'BT.2390 (broadcast reference)';
+		}
+	}
+
+	function tonemapPipelineLabel(p: TonemapPipeline): string {
+		switch (p) {
+			case 'hardware':
+				return 'Hardware (GPU — default)';
+			case 'software':
+				return 'Software (CPU — portable, expensive)';
 		}
 	}
 
@@ -223,8 +238,9 @@
 			<h2 class="text-sm font-medium tracking-wide text-zinc-500 uppercase">HDR tonemapping</h2>
 			<p class="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
 				Maps HDR sources (HDR10 / Dolby Vision base layer / HLG) down to SDR when transcoding for
-				clients that can't display HDR. Off makes HDR content look washed out; on adds a small CPU
-				cost on HDR sources only. SDR transcodes are unaffected either way.
+				clients that can't display HDR. Off makes HDR content look washed out; on either uses the
+				GPU (cheap) or the CPU (heavy but portable) — see Pipeline. SDR transcodes are unaffected
+				either way.
 			</p>
 
 			<form onsubmit={saveTonemap} class="mt-6 flex flex-col gap-4">
@@ -238,6 +254,33 @@
 				</label>
 
 				<label class="flex flex-col gap-2 text-sm">
+					<span class="font-medium text-zinc-700 dark:text-zinc-300">Pipeline</span>
+					<select
+						bind:value={tonemapPipelineInput}
+						disabled={!tonemapEnabledInput}
+						class="w-full max-w-sm rounded border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+					>
+						{#each TONEMAP_PIPELINES as p (p)}
+							<option value={p}>{tonemapPipelineLabel(p)}</option>
+						{/each}
+					</select>
+					<span class="text-xs text-zinc-500 dark:text-zinc-400">
+						Hardware uses <code class="font-mono">tonemap_cuda</code> on NVENC or
+						<code class="font-mono">tonemap_vaapi</code> on VAAPI. If your ffmpeg build doesn't include
+						those filters, switch to Software.
+					</span>
+					{#if tonemapPipelineInput === 'hardware' && settings.tonemap.hardware_supported === false}
+						<div
+							class="rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200"
+						>
+							Your ffmpeg build doesn't include the GPU tonemap filter for the active encoder.
+							Hardware sessions automatically fall back to Software until ffmpeg with the filter
+							compiled in is installed.
+						</div>
+					{/if}
+				</label>
+
+				<label class="flex flex-col gap-2 text-sm">
 					<span class="font-medium text-zinc-700 dark:text-zinc-300">Algorithm</span>
 					<select
 						bind:value={tonemapAlgorithmInput}
@@ -248,6 +291,12 @@
 							<option value={algo}>{tonemapAlgorithmLabel(algo)}</option>
 						{/each}
 					</select>
+					{#if tonemapPipelineInput === 'hardware'}
+						<span class="text-xs text-zinc-500 dark:text-zinc-400">
+							Ignored on VAAPI — the driver picks the curve. Honoured on NVENC and on the Software
+							pipeline.
+						</span>
+					{/if}
 				</label>
 
 				<div class="flex items-center gap-3">

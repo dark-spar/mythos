@@ -72,7 +72,11 @@ async fn ensure_session_produces_first_segment() {
     let work_dir = TempDir::new().unwrap();
     let input = make_test_input(input_dir.path());
 
-    let manager = TranscodeManager::new(work_dir.path().to_path_buf(), mythos_stream::HwAccel::Cpu);
+    let manager = TranscodeManager::new(
+        work_dir.path().to_path_buf(),
+        mythos_stream::HwAccel::Cpu,
+        true,
+    );
     let session = manager
         .ensure_session_for_segment(
             key(),
@@ -96,7 +100,11 @@ async fn same_segment_reuses_existing_session() {
     let work_dir = TempDir::new().unwrap();
     let input = make_test_input(input_dir.path());
     let k = key();
-    let manager = TranscodeManager::new(work_dir.path().to_path_buf(), mythos_stream::HwAccel::Cpu);
+    let manager = TranscodeManager::new(
+        work_dir.path().to_path_buf(),
+        mythos_stream::HwAccel::Cpu,
+        true,
+    );
 
     let first = manager
         .ensure_session_for_segment(
@@ -138,7 +146,11 @@ async fn segment_before_session_start_forces_restart() {
     let work_dir = TempDir::new().unwrap();
     let input = make_test_input(input_dir.path());
     let k = key();
-    let manager = TranscodeManager::new(work_dir.path().to_path_buf(), mythos_stream::HwAccel::Cpu);
+    let manager = TranscodeManager::new(
+        work_dir.path().to_path_buf(),
+        mythos_stream::HwAccel::Cpu,
+        true,
+    );
 
     let first = manager
         .ensure_session_for_segment(
@@ -204,7 +216,11 @@ async fn local_segment_path_maps_global_index_to_session_local() {
     let input_dir = TempDir::new().unwrap();
     let work_dir = TempDir::new().unwrap();
     let input = make_test_input(input_dir.path());
-    let manager = TranscodeManager::new(work_dir.path().to_path_buf(), mythos_stream::HwAccel::Cpu);
+    let manager = TranscodeManager::new(
+        work_dir.path().to_path_buf(),
+        mythos_stream::HwAccel::Cpu,
+        true,
+    );
 
     let session = manager
         .ensure_session_for_segment(
@@ -233,7 +249,11 @@ async fn stop_removes_session_and_cleans_workdir() {
     let work_dir = TempDir::new().unwrap();
     let input = make_test_input(input_dir.path());
     let k = key();
-    let manager = TranscodeManager::new(work_dir.path().to_path_buf(), mythos_stream::HwAccel::Cpu);
+    let manager = TranscodeManager::new(
+        work_dir.path().to_path_buf(),
+        mythos_stream::HwAccel::Cpu,
+        true,
+    );
 
     let session = manager
         .ensure_session_for_segment(

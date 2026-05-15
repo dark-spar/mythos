@@ -228,21 +228,37 @@ struct ManagerInner {
     work_root: PathBuf,
     sessions: RwLock<HashMap<SessionKey, Arc<TranscodeSession>>>,
     accel: HwAccel,
+    /// Whether the active ffmpeg has the GPU tonemap filter for
+    /// `accel` compiled in. False on common distro ffmpegs that
+    /// ship without `tonemap_cuda` etc. The HLS handler reads this
+    /// to silently downgrade `TonemapPipeline::Hardware` to
+    /// `Software` when the filter isn't available.
+    hw_tonemap_available: bool,
 }
 
 impl TranscodeManager {
-    pub fn new(work_root: PathBuf, accel: HwAccel) -> Self {
+    pub fn new(work_root: PathBuf, accel: HwAccel, hw_tonemap_available: bool) -> Self {
         Self {
             inner: Arc::new(ManagerInner {
                 work_root,
                 sessions: RwLock::new(HashMap::new()),
                 accel,
+                hw_tonemap_available,
             }),
         }
     }
 
     pub fn hwaccel(&self) -> HwAccel {
         self.inner.accel
+    }
+
+    /// Whether `TonemapPipeline::Hardware` can actually be honoured
+    /// on this server. False when the chosen encoder has no GPU
+    /// tonemap filter or when ffmpeg's build doesn't include it; in
+    /// either case `Hardware` requests should be quietly downgraded
+    /// to `Software`.
+    pub fn hw_tonemap_available(&self) -> bool {
+        self.inner.hw_tonemap_available
     }
 
     /// Return a session that's either currently transcoding segment
@@ -916,6 +932,7 @@ mod tests {
         let cfg = TonemapConfig {
             apply: true,
             algorithm: TonemapAlgorithm::Hable,
+            ..TonemapConfig::default()
         };
         let graph = build_filter_complex(HwAccel::Cpu, None, cfg, crate::ABR_LADDER);
         // [0:v]<tonemap>[tm];[tm]split=...
@@ -937,6 +954,7 @@ mod tests {
         let cfg = TonemapConfig {
             apply: true,
             algorithm: TonemapAlgorithm::Hable,
+            ..TonemapConfig::default()
         };
         let graph = build_filter_complex(HwAccel::Cpu, Some(3), cfg, crate::ABR_LADDER);
         let tonemap_idx = graph.find("tonemap=").expect("tonemap present");

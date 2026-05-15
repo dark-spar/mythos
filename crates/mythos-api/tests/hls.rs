@@ -35,6 +35,7 @@ async fn setup() -> (Router, SqlitePool, TempDir) {
     let manager = TranscodeManager::new(
         transcode_dir.path().to_path_buf(),
         mythos_stream::HwAccel::Cpu,
+        true,
     );
     let router = mythos_api::router(ApiState {
         db: pool.clone(),

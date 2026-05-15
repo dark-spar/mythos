@@ -37,9 +37,9 @@ use mythos_db::SubtitleRepo;
 use mythos_db::settings::keys as setting_keys;
 use mythos_stream::{
     ABR_LADDER, ItemKind, Rendition, SEGMENT_WAIT_TIMEOUT, SOURCE_VARIANT, SessionKey,
-    TonemapAlgorithm, TonemapConfig, TranscodeError, TranscodeManager, build_master_playlist,
-    build_variant_playlist, is_known_variant, parse_segment_filename, rendition_by_name,
-    source_rendition, wait_for_file,
+    TonemapAlgorithm, TonemapConfig, TonemapPipeline, TranscodeError, TranscodeManager,
+    build_master_playlist, build_variant_playlist, is_known_variant, parse_segment_filename,
+    rendition_by_name, source_rendition, wait_for_file,
 };
 use serde::Deserialize;
 use sqlx::SqlitePool;
@@ -236,7 +236,7 @@ async fn variant_file_inner(
 
     let abs_path = resolve_input_path_for_file(pool, file_id).await?;
     let burn_in_sub = resolve_burn_in_sub(pool, file_id, q.sub).await?;
-    let tonemap = resolve_tonemap_config(pool, file_id).await?;
+    let tonemap = resolve_tonemap_config(pool, file_id, manager.hw_tonemap_available()).await?;
     let key = SessionKey {
         user_id,
         item_id,
@@ -488,10 +488,21 @@ pub(crate) async fn resolve_input_path_for_file(
 /// The admin setting acts as a global on/off so an operator can
 /// disable the curve if it doesn't look right on their content.
 ///
-/// Defaults: enabled = `true`, algorithm = `Hable`. Both are
-/// chosen so a fresh install with no settings rows still tonemaps
-/// HDR content — the un-tonemapped fallback is the bad surprise.
-async fn resolve_tonemap_config(pool: &SqlitePool, file_id: Uuid) -> ApiResult<TonemapConfig> {
+/// `hw_tonemap_available` reflects whether ffmpeg has the GPU
+/// tonemap filter (`tonemap_cuda` / `tonemap_vaapi`) compiled in.
+/// When `false`, a stored pipeline of `Hardware` is silently
+/// downgraded to `Software` — without this, the filter graph would
+/// fail at session startup and every play attempt would 504.
+///
+/// Defaults: enabled = `true`, algorithm = `Hable`,
+/// pipeline = `Hardware`. The defaults are chosen so a fresh
+/// install with no settings rows still tonemaps HDR content cheaply
+/// — the un-tonemapped fallback is the bad surprise.
+async fn resolve_tonemap_config(
+    pool: &SqlitePool,
+    file_id: Uuid,
+    hw_tonemap_available: bool,
+) -> ApiResult<TonemapConfig> {
     let transfer: Option<(Option<String>,)> =
         sqlx::query_as("SELECT color_transfer FROM media_files WHERE id = ?")
             .bind(file_id.to_string())
@@ -524,10 +535,28 @@ async fn resolve_tonemap_config(pool: &SqlitePool, file_id: Uuid) -> ApiResult<T
         .as_deref()
         .map(TonemapAlgorithm::from_str_or_default)
         .unwrap_or_default();
+    let stored_pipeline = repo
+        .get(setting_keys::TONEMAP_PIPELINE)
+        .await?
+        .as_deref()
+        .map(TonemapPipeline::from_str_or_default)
+        .unwrap_or_default();
+    // Stored intent is what the operator picked in the admin UI;
+    // effective is what we'll actually run, after gating on the
+    // ffmpeg build. We don't rewrite the stored row — the operator
+    // may eventually swap to an ffmpeg that does include the
+    // filter, and silently flipping the setting on them would be
+    // surprising.
+    let pipeline = if stored_pipeline == TonemapPipeline::Hardware && !hw_tonemap_available {
+        TonemapPipeline::Software
+    } else {
+        stored_pipeline
+    };
 
     Ok(TonemapConfig {
         apply: is_hdr_source && enabled,
         algorithm,
+        pipeline,
     })
 }
 

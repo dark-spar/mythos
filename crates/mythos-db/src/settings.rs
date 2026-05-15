@@ -62,4 +62,9 @@ pub mod keys {
     /// else falls back to the default. See
     /// `mythos_stream::TonemapAlgorithm`.
     pub const TONEMAP_ALGORITHM: &str = "tonemap_algorithm";
+    /// `hardware` (default) or `software`. Picks where in the
+    /// filter graph the HDR→SDR conversion runs — GPU filter
+    /// (`tonemap_cuda` / `tonemap_vaapi`) versus the CPU `zscale`
+    /// chain. See `mythos_stream::TonemapPipeline`.
+    pub const TONEMAP_PIPELINE: &str = "tonemap_pipeline";
 }

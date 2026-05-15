@@ -12,12 +12,12 @@ use axum::extract::State;
 use mythos_auth::AdminUser;
 use mythos_db::SettingsRepo;
 use mythos_db::settings::keys as setting_keys;
-use mythos_stream::TonemapAlgorithm;
+use mythos_stream::{TonemapAlgorithm, TonemapPipeline};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
 use crate::error::ApiResult;
-use crate::{PostersDir, TmdbHandle, build_tmdb_client, resolve_tmdb_api_key};
+use crate::{HlsHandle, PostersDir, TmdbHandle, build_tmdb_client, resolve_tmdb_api_key};
 
 #[derive(Debug, Serialize)]
 pub struct SettingsResponse {
@@ -35,6 +35,17 @@ pub struct TonemapSettings {
     /// Lowercase algorithm slug — `hable` / `mobius` / `reinhard` /
     /// `bt2390`. Matches [`mythos_stream::TonemapAlgorithm::as_str`].
     pub algorithm: String,
+    /// `hardware` or `software`. Matches
+    /// [`mythos_stream::TonemapPipeline::as_str`].
+    pub pipeline: String,
+    /// `false` when the active ffmpeg build doesn't include the
+    /// GPU tonemap filter for the active encoder
+    /// (`tonemap_cuda` / `tonemap_vaapi`). The HLS handler
+    /// auto-downgrades to the Software pipeline in that case; the
+    /// UI uses this to surface "Hardware unavailable — falling
+    /// back to Software" rather than letting the operator wonder
+    /// why their CPU is still pinned.
+    pub hardware_supported: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,10 +83,14 @@ pub struct SettingsUpdate {
     /// Tonemap operator. Unknown values are coerced to the default
     /// (Hable) on the way in.
     pub tonemap_algorithm: Option<String>,
+    /// Tonemap pipeline — `hardware` or `software`. Unknown values
+    /// are coerced to `hardware` on the way in.
+    pub tonemap_pipeline: Option<String>,
 }
 
 pub async fn get_settings(
     State(pool): State<SqlitePool>,
+    State(hls): State<HlsHandle>,
     _user: AdminUser,
 ) -> ApiResult<Json<SettingsResponse>> {
     let env_set = std::env::var("MYTHOS_TMDB_API_KEY")
@@ -112,6 +127,18 @@ pub async fn get_settings(
         .as_deref()
         .map(TonemapAlgorithm::from_str_or_default)
         .unwrap_or_default();
+    let tonemap_pipeline = repo
+        .get(setting_keys::TONEMAP_PIPELINE)
+        .await?
+        .as_deref()
+        .map(TonemapPipeline::from_str_or_default)
+        .unwrap_or_default();
+
+    let hardware_supported = hls
+        .0
+        .as_ref()
+        .map(|m| m.hw_tonemap_available())
+        .unwrap_or(false);
 
     Ok(Json(SettingsResponse {
         tmdb: TmdbSettings {
@@ -122,6 +149,8 @@ pub async fn get_settings(
         tonemap: TonemapSettings {
             enabled: tonemap_enabled,
             algorithm: tonemap_algorithm.as_str().to_string(),
+            pipeline: tonemap_pipeline.as_str().to_string(),
+            hardware_supported,
         },
     }))
 }
@@ -130,6 +159,7 @@ pub async fn put_settings(
     State(pool): State<SqlitePool>,
     State(tmdb): State<TmdbHandle>,
     State(posters): State<PostersDir>,
+    State(hls): State<HlsHandle>,
     _user: AdminUser,
     Json(update): Json<SettingsUpdate>,
 ) -> ApiResult<Json<SettingsResponse>> {
@@ -153,6 +183,11 @@ pub async fn put_settings(
         repo.set(setting_keys::TONEMAP_ALGORITHM, coerced.as_str())
             .await?;
     }
+    if let Some(pipeline) = update.tonemap_pipeline.as_deref() {
+        let coerced = TonemapPipeline::from_str_or_default(pipeline);
+        repo.set(setting_keys::TONEMAP_PIPELINE, coerced.as_str())
+            .await?;
+    }
 
     // Rebuild the in-memory client from whatever the new active
     // value is (env or DB), so the swap takes effect immediately.
@@ -160,5 +195,5 @@ pub async fn put_settings(
     let client = active.map(|key| build_tmdb_client(&key, posters.0.clone()));
     tmdb.replace(client).await;
 
-    get_settings(State(pool), _user).await
+    get_settings(State(pool), State(hls), _user).await
 }

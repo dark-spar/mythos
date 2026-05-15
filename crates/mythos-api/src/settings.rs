@@ -12,6 +12,7 @@ use axum::extract::State;
 use mythos_auth::AdminUser;
 use mythos_db::SettingsRepo;
 use mythos_db::settings::keys as setting_keys;
+use mythos_stream::TonemapAlgorithm;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
@@ -21,6 +22,19 @@ use crate::{PostersDir, TmdbHandle, build_tmdb_client, resolve_tmdb_api_key};
 #[derive(Debug, Serialize)]
 pub struct SettingsResponse {
     pub tmdb: TmdbSettings,
+    pub tonemap: TonemapSettings,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TonemapSettings {
+    /// Whether HDR→SDR tonemapping is enabled. Defaults to `true`
+    /// when nothing is stored — an HDR source served straight to
+    /// SDR clients without tonemap looks washed out, and that's
+    /// the surprising-default footgun this setting exists to dodge.
+    pub enabled: bool,
+    /// Lowercase algorithm slug — `hable` / `mobius` / `reinhard` /
+    /// `bt2390`. Matches [`mythos_stream::TonemapAlgorithm::as_str`].
+    pub algorithm: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -52,6 +66,12 @@ pub struct SettingsUpdate {
     /// Trimmed before storage. Empty string clears the stored
     /// value.
     pub tmdb_api_key: Option<String>,
+    /// HDR→SDR tonemapping master switch. `None` leaves the
+    /// existing value untouched.
+    pub tonemap_enabled: Option<bool>,
+    /// Tonemap operator. Unknown values are coerced to the default
+    /// (Hable) on the way in.
+    pub tonemap_algorithm: Option<String>,
 }
 
 pub async fn get_settings(
@@ -62,9 +82,8 @@ pub async fn get_settings(
         .ok()
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
-    let db_value = SettingsRepo::new(pool.clone())
-        .get(setting_keys::TMDB_API_KEY)
-        .await?;
+    let repo = SettingsRepo::new(pool.clone());
+    let db_value = repo.get(setting_keys::TMDB_API_KEY).await?;
     let db_set = db_value
         .as_deref()
         .map(|v| !v.trim().is_empty())
@@ -76,11 +95,33 @@ pub async fn get_settings(
         (false, false) => (false, TmdbSource::None),
     };
 
+    let tonemap_enabled = repo
+        .get(setting_keys::TONEMAP_ENABLED)
+        .await?
+        .as_deref()
+        .map(|v| {
+            !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "false" | "0" | "off"
+            )
+        })
+        .unwrap_or(true);
+    let tonemap_algorithm = repo
+        .get(setting_keys::TONEMAP_ALGORITHM)
+        .await?
+        .as_deref()
+        .map(TonemapAlgorithm::from_str_or_default)
+        .unwrap_or_default();
+
     Ok(Json(SettingsResponse {
         tmdb: TmdbSettings {
             configured,
             source,
             value: db_value.filter(|v| !v.trim().is_empty()),
+        },
+        tonemap: TonemapSettings {
+            enabled: tonemap_enabled,
+            algorithm: tonemap_algorithm.as_str().to_string(),
         },
     }))
 }
@@ -92,9 +133,24 @@ pub async fn put_settings(
     _user: AdminUser,
     Json(update): Json<SettingsUpdate>,
 ) -> ApiResult<Json<SettingsResponse>> {
+    let repo = SettingsRepo::new(pool.clone());
     if let Some(value) = update.tmdb_api_key.as_deref() {
-        SettingsRepo::new(pool.clone())
-            .set(setting_keys::TMDB_API_KEY, value.trim())
+        repo.set(setting_keys::TMDB_API_KEY, value.trim()).await?;
+    }
+    if let Some(enabled) = update.tonemap_enabled {
+        repo.set(
+            setting_keys::TONEMAP_ENABLED,
+            if enabled { "true" } else { "false" },
+        )
+        .await?;
+    }
+    if let Some(algo) = update.tonemap_algorithm.as_deref() {
+        // Normalize on the way in: unknown values collapse to the
+        // default so the DB never grows mystery strings, and the
+        // value we round-trip back to the UI is always one of the
+        // four known slugs.
+        let coerced = TonemapAlgorithm::from_str_or_default(algo);
+        repo.set(setting_keys::TONEMAP_ALGORITHM, coerced.as_str())
             .await?;
     }
 

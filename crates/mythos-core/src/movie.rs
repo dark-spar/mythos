@@ -19,11 +19,40 @@ pub struct Probe {
     pub duration_seconds: Option<f64>,
     pub width: Option<i64>,
     pub height: Option<i64>,
+    /// Raw ffprobe `color_primaries` (e.g. `"bt2020"`, `"bt709"`).
+    /// Used together with [`color_transfer`](Self::color_transfer) to
+    /// decide whether to apply HDR→SDR tonemapping when transcoding.
+    #[serde(default)]
+    pub color_primaries: Option<String>,
+    /// Raw ffprobe `color_transfer` (e.g. `"smpte2084"` for HDR10 PQ,
+    /// `"arib-std-b67"` for HLG, `"bt709"` for SDR). Load-bearing
+    /// signal for HDR detection — see [`Probe::is_hdr`].
+    #[serde(default)]
+    pub color_transfer: Option<String>,
+    /// Raw ffprobe `color_space` (e.g. `"bt2020nc"`, `"bt709"`).
+    /// Stored for completeness; not currently consulted by the
+    /// transcode-decision code.
+    #[serde(default)]
+    pub color_space: Option<String>,
     /// Subtitle streams found by ffprobe. Empty when no tracks exist
     /// or ffprobe failed; the scanner clears existing rows and
     /// reinserts these on every successful re-scan.
     #[serde(default)]
     pub subtitles: Vec<NewSubtitle>,
+}
+
+impl Probe {
+    /// True when the source carries an HDR transfer function — PQ
+    /// (HDR10 / Dolby Vision base layer) or HLG. The transfer
+    /// characteristic is the actually load-bearing signal: BT.2020
+    /// primaries alone don't make a stream HDR, but `smpte2084` or
+    /// `arib-std-b67` transfer does.
+    pub fn is_hdr(&self) -> bool {
+        matches!(
+            self.color_transfer.as_deref(),
+            Some("smpte2084" | "arib-std-b67")
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

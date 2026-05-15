@@ -32,6 +32,63 @@ use tracing::{debug, info, warn};
 
 use crate::abr::Rendition;
 
+/// Tonemap operator chosen by the operator from the admin settings.
+/// All four are CPU `tonemap` filter modes — we deliberately do **not**
+/// expose libplacebo / `tonemap_vaapi` here. The HW-accel pipelines
+/// `hwdownload` to system memory, run the same CPU chain, then
+/// `hwupload` so the encoder still runs on the GPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TonemapAlgorithm {
+    /// Filmic curve from John Hable's "Uncharted 2" presentation —
+    /// the default. Generally the best-looking trade-off across
+    /// content types and the de facto industry default.
+    #[default]
+    Hable,
+    /// Less contrast crushing than Hable; preserves more detail in
+    /// extreme highlights at the cost of looking slightly flatter.
+    Mobius,
+    /// Simple Reinhard operator. Conservative, slightly washed out
+    /// next to Hable but very stable.
+    Reinhard,
+    /// ITU-R BT.2390 reference tone-mapping. Broadcast-style result,
+    /// requires a recent ffmpeg with the BT.2390 mode compiled in.
+    Bt2390,
+}
+
+impl TonemapAlgorithm {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TonemapAlgorithm::Hable => "hable",
+            TonemapAlgorithm::Mobius => "mobius",
+            TonemapAlgorithm::Reinhard => "reinhard",
+            TonemapAlgorithm::Bt2390 => "bt2390",
+        }
+    }
+
+    /// Parse an admin-supplied algorithm name. Unknown values fall
+    /// back to [`TonemapAlgorithm::Hable`] so a stale DB value
+    /// doesn't break playback.
+    pub fn from_str_or_default(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "mobius" => TonemapAlgorithm::Mobius,
+            "reinhard" => TonemapAlgorithm::Reinhard,
+            "bt2390" => TonemapAlgorithm::Bt2390,
+            _ => TonemapAlgorithm::Hable,
+        }
+    }
+}
+
+/// Whether and how to perform HDR→SDR tonemapping inside the filter
+/// graph. Computed per-session from the admin settings + the source's
+/// detected HDR transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TonemapConfig {
+    /// `true` when both: the source is HDR (PQ or HLG transfer) AND
+    /// the operator hasn't disabled tonemapping in settings.
+    pub apply: bool,
+    pub algorithm: TonemapAlgorithm,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HwAccel {
     Nvenc,
@@ -139,6 +196,43 @@ impl HwAccel {
                 "-q:v".into(),
                 "50".into(),
             ],
+        }
+    }
+
+    /// HDR→SDR tonemap chain inserted **before** the split fan-out.
+    /// Empty string when [`TonemapConfig::apply`] is false so the
+    /// filter graph builder can paste it in unconditionally.
+    ///
+    /// All accels run the same CPU `zscale`+`tonemap` chain — the
+    /// HW-accel paths just wrap it in `hwdownload`/`hwupload` so the
+    /// surface returns to GPU memory in time for `scale_cuda` /
+    /// `scale_vaapi` and the GPU encoder. That's the deliberate
+    /// trade-off chosen at design time: a brief round-trip to system
+    /// memory on HDR content in exchange for not having to gate on
+    /// libplacebo / `tonemap_vaapi` build flags. SDR sources hit
+    /// `apply=false` and skip this entirely.
+    pub fn tonemap_prefilter(self, cfg: TonemapConfig) -> String {
+        if !cfg.apply {
+            return String::new();
+        }
+        let algo = cfg.algorithm.as_str();
+        // 1. zscale to linear light (PQ/HLG → linear).
+        // 2. float pixel format — `tonemap` requires float input.
+        // 3. zscale primaries BT.2020 → BT.709.
+        // 4. tonemap with the operator-chosen curve. desat=0 keeps
+        //    saturation untouched; the curve already handles luma.
+        // 5. zscale back to BT.709 transfer + matrix at TV range.
+        // 6. format=yuv420p so the downstream encoder / hwupload gets
+        //    an 8-bit planar input.
+        let cpu = format!(
+            "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,\
+             tonemap=tonemap={algo}:desat=0,\
+             zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
+        );
+        match self {
+            HwAccel::Cpu | HwAccel::Qsv | HwAccel::VideoToolbox => cpu,
+            HwAccel::Nvenc => format!("hwdownload,format=p010le,{cpu},hwupload_cuda"),
+            HwAccel::Vaapi => format!("hwdownload,format=p010le,{cpu},format=nv12,hwupload"),
         }
     }
 
@@ -408,5 +502,98 @@ mod tests {
         // worst with HwAccel::Cpu).
         let chosen = resolve("definitely-not-a-mode").await.unwrap();
         let _ = chosen.as_str();
+    }
+
+    #[test]
+    fn tonemap_algorithm_parses_known_slugs() {
+        assert_eq!(
+            TonemapAlgorithm::from_str_or_default("hable"),
+            TonemapAlgorithm::Hable
+        );
+        assert_eq!(
+            TonemapAlgorithm::from_str_or_default("MOBIUS"),
+            TonemapAlgorithm::Mobius
+        );
+        assert_eq!(
+            TonemapAlgorithm::from_str_or_default("  reinhard  "),
+            TonemapAlgorithm::Reinhard
+        );
+        assert_eq!(
+            TonemapAlgorithm::from_str_or_default("bt2390"),
+            TonemapAlgorithm::Bt2390
+        );
+    }
+
+    #[test]
+    fn tonemap_algorithm_falls_back_to_default_on_unknown() {
+        // Stale DB values must not break playback. Default is Hable
+        // because it's the de facto industry choice; if the operator
+        // disagrees they re-pick from the UI.
+        assert_eq!(
+            TonemapAlgorithm::from_str_or_default(""),
+            TonemapAlgorithm::Hable
+        );
+        assert_eq!(
+            TonemapAlgorithm::from_str_or_default("definitely-not-an-operator"),
+            TonemapAlgorithm::Hable
+        );
+    }
+
+    #[test]
+    fn tonemap_prefilter_is_empty_when_disabled() {
+        let cfg = TonemapConfig {
+            apply: false,
+            algorithm: TonemapAlgorithm::Hable,
+        };
+        for accel in [
+            HwAccel::Cpu,
+            HwAccel::Nvenc,
+            HwAccel::Vaapi,
+            HwAccel::Qsv,
+            HwAccel::VideoToolbox,
+        ] {
+            assert!(
+                accel.tonemap_prefilter(cfg).is_empty(),
+                "{accel:?} should emit nothing when apply=false"
+            );
+        }
+    }
+
+    #[test]
+    fn tonemap_prefilter_cpu_chain_has_no_hw_round_trip() {
+        let chain = HwAccel::Cpu.tonemap_prefilter(TonemapConfig {
+            apply: true,
+            algorithm: TonemapAlgorithm::Hable,
+        });
+        // CPU pipeline runs the tonemap inline with no hwdownload /
+        // hwupload around it — anything else would be wasted work.
+        assert!(chain.contains("zscale=t=linear"));
+        assert!(chain.contains("tonemap=tonemap=hable"));
+        assert!(!chain.contains("hwdownload"));
+        assert!(!chain.contains("hwupload"));
+    }
+
+    #[test]
+    fn tonemap_prefilter_nvenc_wraps_in_hwdownload_and_hwupload_cuda() {
+        let chain = HwAccel::Nvenc.tonemap_prefilter(TonemapConfig {
+            apply: true,
+            algorithm: TonemapAlgorithm::Bt2390,
+        });
+        assert!(chain.starts_with("hwdownload"));
+        assert!(chain.contains("tonemap=tonemap=bt2390"));
+        assert!(chain.ends_with("hwupload_cuda"));
+    }
+
+    #[test]
+    fn tonemap_prefilter_vaapi_lands_in_nv12_before_hwupload() {
+        let chain = HwAccel::Vaapi.tonemap_prefilter(TonemapConfig {
+            apply: true,
+            algorithm: TonemapAlgorithm::Mobius,
+        });
+        assert!(chain.starts_with("hwdownload"));
+        // scale_vaapi expects nv12 input — the CPU chain ends in
+        // yuv420p, so we need an explicit format step before the
+        // upload back to GPU surfaces.
+        assert!(chain.contains("format=nv12,hwupload"));
     }
 }

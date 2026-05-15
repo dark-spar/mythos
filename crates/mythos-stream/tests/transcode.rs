@@ -8,7 +8,9 @@ use std::process::Command;
 use std::time::Duration;
 
 use mythos_core::{PlaybackMode, ffmpeg_bin};
-use mythos_stream::{ABR_LADDER, ItemKind, SessionKey, TranscodeManager, wait_for_file};
+use mythos_stream::{
+    ABR_LADDER, ItemKind, SessionKey, TonemapConfig, TranscodeManager, wait_for_file,
+};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -79,6 +81,7 @@ async fn ensure_session_produces_first_segment() {
             0,
             None,
             PlaybackMode::TranscodeFull,
+            TonemapConfig::default(),
             ABR_LADDER,
         )
         .await
@@ -103,6 +106,7 @@ async fn same_segment_reuses_existing_session() {
             0,
             None,
             PlaybackMode::TranscodeFull,
+            TonemapConfig::default(),
             ABR_LADDER,
         )
         .await
@@ -115,6 +119,7 @@ async fn same_segment_reuses_existing_session() {
             0,
             None,
             PlaybackMode::TranscodeFull,
+            TonemapConfig::default(),
             ABR_LADDER,
         )
         .await
@@ -143,6 +148,7 @@ async fn segment_before_session_start_forces_restart() {
             1,
             None,
             PlaybackMode::TranscodeFull,
+            TonemapConfig::default(),
             ABR_LADDER,
         )
         .await
@@ -160,6 +166,7 @@ async fn segment_before_session_start_forces_restart() {
             0,
             None,
             PlaybackMode::TranscodeFull,
+            TonemapConfig::default(),
             ABR_LADDER,
         )
         .await
@@ -180,6 +187,7 @@ async fn segment_before_session_start_forces_restart() {
             0,
             None,
             PlaybackMode::TranscodeFull,
+            TonemapConfig::default(),
             ABR_LADDER,
         )
         .await
@@ -206,6 +214,7 @@ async fn local_segment_path_maps_global_index_to_session_local() {
             3,
             None,
             PlaybackMode::TranscodeFull,
+            TonemapConfig::default(),
             ABR_LADDER,
         )
         .await
@@ -234,6 +243,7 @@ async fn stop_removes_session_and_cleans_workdir() {
             0,
             None,
             PlaybackMode::TranscodeFull,
+            TonemapConfig::default(),
             ABR_LADDER,
         )
         .await

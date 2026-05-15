@@ -13,7 +13,7 @@ pub use abr::{
     ABR_LADDER, Rendition, SOURCE_VARIANT, default_variant, is_known_variant, rendition_by_name,
     source_rendition,
 };
-pub use hwaccel::{HwAccel, resolve as resolve_hwaccel};
+pub use hwaccel::{HwAccel, TonemapAlgorithm, TonemapConfig, resolve as resolve_hwaccel};
 pub use transcode::{
     ItemKind, SEGMENT_DURATION_SECS, SEGMENT_WAIT_TIMEOUT, SessionKey, TranscodeError,
     TranscodeManager, TranscodeSession, build_master_playlist, build_variant_playlist,

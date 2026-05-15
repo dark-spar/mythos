@@ -24,6 +24,9 @@ struct MediaFileRow {
     duration_seconds: Option<f64>,
     width: Option<i64>,
     height: Option<i64>,
+    color_primaries: Option<String>,
+    color_transfer: Option<String>,
+    color_space: Option<String>,
     scanned_at: String,
 }
 
@@ -42,6 +45,9 @@ impl MediaFileRow {
                 duration_seconds: self.duration_seconds,
                 width: self.width,
                 height: self.height,
+                color_primaries: self.color_primaries,
+                color_transfer: self.color_transfer,
+                color_space: self.color_space,
                 // Subtitles aren't carried alongside the MediaFile row;
                 // SubtitleRepo fetches them per-file when needed.
                 subtitles: Vec::new(),
@@ -97,8 +103,9 @@ impl MediaFileRepo {
         let row: MediaFileRow = sqlx::query_as(
             "INSERT INTO media_files \
                (id, library_id, path, size_bytes, mtime, container, video_codec, \
-                audio_codec, duration_seconds, width, height) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                audio_codec, duration_seconds, width, height, \
+                color_primaries, color_transfer, color_space) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (library_id, path) DO UPDATE SET \
                size_bytes       = excluded.size_bytes, \
                mtime            = excluded.mtime, \
@@ -108,9 +115,13 @@ impl MediaFileRepo {
                duration_seconds = excluded.duration_seconds, \
                width            = excluded.width, \
                height           = excluded.height, \
+               color_primaries  = excluded.color_primaries, \
+               color_transfer   = excluded.color_transfer, \
+               color_space      = excluded.color_space, \
                scanned_at       = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
              RETURNING id, library_id, path, size_bytes, mtime, container, \
                video_codec, audio_codec, duration_seconds, width, height, \
+               color_primaries, color_transfer, color_space, \
                scanned_at",
         )
         .bind(new_id.to_string())
@@ -124,6 +135,9 @@ impl MediaFileRepo {
         .bind(new.probe.duration_seconds)
         .bind(new.probe.width)
         .bind(new.probe.height)
+        .bind(&new.probe.color_primaries)
+        .bind(&new.probe.color_transfer)
+        .bind(&new.probe.color_space)
         .fetch_one(&mut *tx)
         .await?;
 
@@ -162,6 +176,7 @@ impl MediaFileRepo {
         let rows: Vec<MediaFileRow> = sqlx::query_as(
             "SELECT id, library_id, path, size_bytes, mtime, container, \
                     video_codec, audio_codec, duration_seconds, width, height, \
+                    color_primaries, color_transfer, color_space, \
                     scanned_at \
              FROM media_files WHERE library_id = ? ORDER BY path",
         )
@@ -177,6 +192,7 @@ impl MediaFileRepo {
         let row: Option<MediaFileRow> = sqlx::query_as(
             "SELECT id, library_id, path, size_bytes, mtime, container, \
                     video_codec, audio_codec, duration_seconds, width, height, \
+                    color_primaries, color_transfer, color_space, \
                     scanned_at \
              FROM media_files WHERE id = ?",
         )

@@ -32,11 +32,14 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use mythos_auth::AuthUser;
 use mythos_core::PlaybackMode;
+use mythos_db::SettingsRepo;
 use mythos_db::SubtitleRepo;
+use mythos_db::settings::keys as setting_keys;
 use mythos_stream::{
     ABR_LADDER, ItemKind, Rendition, SEGMENT_WAIT_TIMEOUT, SOURCE_VARIANT, SessionKey,
-    TranscodeError, TranscodeManager, build_master_playlist, build_variant_playlist,
-    is_known_variant, parse_segment_filename, rendition_by_name, source_rendition, wait_for_file,
+    TonemapAlgorithm, TonemapConfig, TranscodeError, TranscodeManager, build_master_playlist,
+    build_variant_playlist, is_known_variant, parse_segment_filename, rendition_by_name,
+    source_rendition, wait_for_file,
 };
 use serde::Deserialize;
 use sqlx::SqlitePool;
@@ -233,6 +236,7 @@ async fn variant_file_inner(
 
     let abs_path = resolve_input_path_for_file(pool, file_id).await?;
     let burn_in_sub = resolve_burn_in_sub(pool, file_id, q.sub).await?;
+    let tonemap = resolve_tonemap_config(pool, file_id).await?;
     let key = SessionKey {
         user_id,
         item_id,
@@ -247,6 +251,7 @@ async fn variant_file_inner(
             seg_idx,
             burn_in_sub,
             mode,
+            tonemap,
             &renditions,
         )
         .await
@@ -473,6 +478,57 @@ pub(crate) async fn resolve_input_path_for_file(
         return Err(ApiError::new(StatusCode::NOT_FOUND, "file_missing"));
     }
     Ok(abs)
+}
+
+/// Decide whether this session should tonemap HDR→SDR.
+///
+/// HDR is detected from the source's `color_transfer` column
+/// (`smpte2084` = HDR10 PQ, `arib-std-b67` = HLG); anything else
+/// means an SDR source where tonemapping would be a no-op or worse.
+/// The admin setting acts as a global on/off so an operator can
+/// disable the curve if it doesn't look right on their content.
+///
+/// Defaults: enabled = `true`, algorithm = `Hable`. Both are
+/// chosen so a fresh install with no settings rows still tonemaps
+/// HDR content — the un-tonemapped fallback is the bad surprise.
+async fn resolve_tonemap_config(pool: &SqlitePool, file_id: Uuid) -> ApiResult<TonemapConfig> {
+    let transfer: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT color_transfer FROM media_files WHERE id = ?")
+            .bind(file_id.to_string())
+            .fetch_optional(pool)
+            .await
+            .map_err(|err| {
+                tracing::error!(?err, "color_transfer lookup failed");
+                ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal")
+            })?;
+    let is_hdr_source = matches!(
+        transfer.and_then(|(t,)| t).as_deref(),
+        Some("smpte2084" | "arib-std-b67")
+    );
+
+    let repo = SettingsRepo::new(pool.clone());
+    let enabled = repo
+        .get(setting_keys::TONEMAP_ENABLED)
+        .await?
+        .as_deref()
+        .map(|v| {
+            !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "false" | "0" | "off"
+            )
+        })
+        .unwrap_or(true);
+    let algorithm = repo
+        .get(setting_keys::TONEMAP_ALGORITHM)
+        .await?
+        .as_deref()
+        .map(TonemapAlgorithm::from_str_or_default)
+        .unwrap_or_default();
+
+    Ok(TonemapConfig {
+        apply: is_hdr_source && enabled,
+        algorithm,
+    })
 }
 
 async fn file_duration_seconds(pool: &SqlitePool, file_id: Uuid) -> ApiResult<f64> {

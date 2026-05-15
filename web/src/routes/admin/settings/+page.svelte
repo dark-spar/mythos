@@ -3,7 +3,13 @@
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { auth } from '$lib/auth.svelte';
-	import { getSettings, updateSettings, type Settings } from '$lib/settings';
+	import {
+		getSettings,
+		updateSettings,
+		TONEMAP_ALGORITHMS,
+		type Settings,
+		type TonemapAlgorithm
+	} from '$lib/settings';
 
 	let settings = $state<Settings | null>(null);
 	let loading = $state(true);
@@ -14,6 +20,12 @@
 	let saving = $state(false);
 	let saveError = $state<string | null>(null);
 	let saveOk = $state(false);
+
+	let tonemapEnabledInput = $state(true);
+	let tonemapAlgorithmInput = $state<TonemapAlgorithm>('hable');
+	let savingTonemap = $state(false);
+	let tonemapError = $state<string | null>(null);
+	let tonemapOk = $state(false);
 
 	onMount(async () => {
 		if (!auth.user?.is_admin) {
@@ -29,10 +41,45 @@
 		try {
 			settings = await getSettings();
 			tmdbInput = settings.tmdb.value ?? '';
+			tonemapEnabledInput = settings.tonemap.enabled;
+			tonemapAlgorithmInput = settings.tonemap.algorithm;
 		} catch (e) {
 			loadError = e instanceof Error ? e.message : 'failed to load';
 		} finally {
 			loading = false;
+		}
+	}
+
+	async function saveTonemap(e: SubmitEvent) {
+		e.preventDefault();
+		savingTonemap = true;
+		tonemapError = null;
+		tonemapOk = false;
+		try {
+			settings = await updateSettings({
+				tonemap_enabled: tonemapEnabledInput,
+				tonemap_algorithm: tonemapAlgorithmInput
+			});
+			tonemapEnabledInput = settings.tonemap.enabled;
+			tonemapAlgorithmInput = settings.tonemap.algorithm;
+			tonemapOk = true;
+		} catch (e) {
+			tonemapError = e instanceof Error ? e.message : 'failed to save';
+		} finally {
+			savingTonemap = false;
+		}
+	}
+
+	function tonemapAlgorithmLabel(a: TonemapAlgorithm): string {
+		switch (a) {
+			case 'hable':
+				return 'Hable (filmic — default)';
+			case 'mobius':
+				return 'Mobius (preserves highlight detail)';
+			case 'reinhard':
+				return 'Reinhard (conservative)';
+			case 'bt2390':
+				return 'BT.2390 (broadcast reference)';
 		}
 	}
 
@@ -167,6 +214,56 @@
 				{:else if saveOk}
 					<p class="text-xs text-emerald-600 dark:text-emerald-400">
 						Saved. Next library scan will use the new key.
+					</p>
+				{/if}
+			</form>
+		</section>
+
+		<section class="mt-8 rounded-lg border border-zinc-200 p-6 dark:border-zinc-800">
+			<h2 class="text-sm font-medium tracking-wide text-zinc-500 uppercase">HDR tonemapping</h2>
+			<p class="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
+				Maps HDR sources (HDR10 / Dolby Vision base layer / HLG) down to SDR when transcoding for
+				clients that can't display HDR. Off makes HDR content look washed out; on adds a small CPU
+				cost on HDR sources only. SDR transcodes are unaffected either way.
+			</p>
+
+			<form onsubmit={saveTonemap} class="mt-6 flex flex-col gap-4">
+				<label class="flex items-center gap-3 text-sm">
+					<input
+						type="checkbox"
+						bind:checked={tonemapEnabledInput}
+						class="h-4 w-4 rounded border-zinc-300 dark:border-zinc-700"
+					/>
+					<span class="text-zinc-900 dark:text-zinc-100">Enable HDR→SDR tonemapping</span>
+				</label>
+
+				<label class="flex flex-col gap-2 text-sm">
+					<span class="font-medium text-zinc-700 dark:text-zinc-300">Algorithm</span>
+					<select
+						bind:value={tonemapAlgorithmInput}
+						disabled={!tonemapEnabledInput}
+						class="w-full max-w-sm rounded border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+					>
+						{#each TONEMAP_ALGORITHMS as algo (algo)}
+							<option value={algo}>{tonemapAlgorithmLabel(algo)}</option>
+						{/each}
+					</select>
+				</label>
+
+				<div class="flex items-center gap-3">
+					<button
+						type="submit"
+						disabled={savingTonemap}
+						class="rounded bg-zinc-900 px-4 py-2 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+					>
+						{savingTonemap ? 'Saving…' : 'Save'}
+					</button>
+				</div>
+				{#if tonemapError}
+					<p class="text-xs text-rose-500">{tonemapError}</p>
+				{:else if tonemapOk}
+					<p class="text-xs text-emerald-600 dark:text-emerald-400">
+						Saved. Active sessions restart on the next segment fetch.
 					</p>
 				{/if}
 			</form>

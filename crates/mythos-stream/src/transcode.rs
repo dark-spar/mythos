@@ -38,7 +38,7 @@ use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::abr::{Rendition, is_known_variant};
-use crate::hwaccel::HwAccel;
+use crate::hwaccel::{HwAccel, TonemapConfig};
 
 /// Target HLS segment duration in seconds. Anything that builds the
 /// synthetic playlist must use this same constant or the playlist's
@@ -128,6 +128,10 @@ pub struct TranscodeSession {
     /// direct-play/remux/transcode-* is a restart trigger because
     /// the ffmpeg invocation differs per mode.
     pub mode: PlaybackMode,
+    /// Whether the filter graph for this session is doing HDR→SDR
+    /// tonemapping, and which curve. Toggling either is a restart
+    /// trigger because the filter graph differs.
+    pub tonemap: TonemapConfig,
     /// Renditions emitted by ffmpeg in this session. Names match the
     /// `%v` subdirectories under `work_dir`. For copy modes this is
     /// a single source-resolution rendition; for ABR modes a subset
@@ -244,8 +248,8 @@ impl TranscodeManager {
     /// Return a session that's either currently transcoding segment
     /// `seg_idx` or will be very shortly. Restarts the session if any
     /// of the following differ from the existing one: `seg_idx`
-    /// (before-start or too-far-ahead), `burn_in_sub`, `mode`, or
-    /// the rendition list.
+    /// (before-start or too-far-ahead), `burn_in_sub`, `mode`,
+    /// `tonemap`, or the rendition list.
     ///
     /// If the existing session is younger than
     /// [`RESTART_GRACE_PERIOD`] and the requested segment isn't
@@ -263,6 +267,7 @@ impl TranscodeManager {
         seg_idx: u32,
         burn_in_sub: Option<i64>,
         mode: PlaybackMode,
+        tonemap: TonemapConfig,
         renditions: &[Rendition],
     ) -> Result<Arc<TranscodeSession>, TranscodeError> {
         if mode == PlaybackMode::DirectPlay {
@@ -276,13 +281,14 @@ impl TranscodeManager {
             return Err(TranscodeError::InvalidVariant(variant.to_string()));
         }
         // Fast path: existing session covers this segment AND has the
-        // same subtitle / mode / rendition selection.
+        // same subtitle / mode / tonemap / rendition selection.
         let needs_restart = {
             let sessions = self.inner.sessions.read().await;
             match sessions.get(&key) {
                 Some(existing)
                     if existing.burn_in_sub != burn_in_sub
                         || existing.mode != mode
+                        || existing.tonemap != tonemap
                         || !rendition_names_match(&existing.renditions, renditions) =>
                 {
                     if existing.started_at.elapsed() < RESTART_GRACE_PERIOD {
@@ -322,12 +328,21 @@ impl TranscodeManager {
             // Logically unreachable, but spell it out for clarity.
             return Err(TranscodeError::Timeout);
         }
-        self.restart_at(key, input_path, seg_idx, burn_in_sub, mode, renditions)
-            .await
+        self.restart_at(
+            key,
+            input_path,
+            seg_idx,
+            burn_in_sub,
+            mode,
+            tonemap,
+            renditions,
+        )
+        .await
     }
 
     /// Start a fresh session at `seg_idx`, killing any existing session
     /// under the same key.
+    #[allow(clippy::too_many_arguments)]
     async fn restart_at(
         &self,
         key: SessionKey,
@@ -335,6 +350,7 @@ impl TranscodeManager {
         seg_idx: u32,
         burn_in_sub: Option<i64>,
         mode: PlaybackMode,
+        tonemap: TonemapConfig,
         renditions: &[Rendition],
     ) -> Result<Arc<TranscodeSession>, TranscodeError> {
         let mut sessions = self.inner.sessions.write().await;
@@ -384,6 +400,8 @@ impl TranscodeManager {
             encoder = session_accel.h264_encoder(),
             renditions = renditions.len(),
             burn_in_sub = ?burn_in_sub,
+            tonemap = tonemap.apply,
+            tonemap_algo = tonemap.algorithm.as_str(),
             "starting ffmpeg transcode session"
         );
 
@@ -394,6 +412,7 @@ impl TranscodeManager {
             session_accel,
             burn_in_sub,
             mode,
+            tonemap,
             renditions,
         )
         .await
@@ -404,6 +423,7 @@ impl TranscodeManager {
             start_segment: seg_idx,
             burn_in_sub,
             mode,
+            tonemap,
             renditions: renditions.to_vec(),
             work_dir,
             started_at: Instant::now(),
@@ -478,6 +498,7 @@ pub async fn wait_for_file(path: &Path, timeout: Duration) -> Result<(), Transco
     Err(TranscodeError::Timeout)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn launch_ffmpeg(
     input: &Path,
     work_dir: &Path,
@@ -485,6 +506,7 @@ async fn launch_ffmpeg(
     accel: HwAccel,
     burn_in_sub: Option<i64>,
     mode: PlaybackMode,
+    tonemap: TonemapConfig,
     renditions: &[Rendition],
 ) -> std::io::Result<Child> {
     // Per-variant subdirs are pre-created by the caller. ffmpeg
@@ -517,8 +539,12 @@ async fn launch_ffmpeg(
 
     // Filter graph only applies when we're re-encoding video.
     if !copy_video {
-        cmd.arg("-filter_complex")
-            .arg(build_filter_complex(accel, burn_in_sub, renditions));
+        cmd.arg("-filter_complex").arg(build_filter_complex(
+            accel,
+            burn_in_sub,
+            tonemap,
+            renditions,
+        ));
     }
 
     // Map: per output index, the right video + audio source.
@@ -607,35 +633,54 @@ async fn launch_ffmpeg(
     Ok(child)
 }
 
-/// Construct the `-filter_complex` argument that optionally burns a
-/// subtitle stream into the video, then splits the result N ways and
-/// scales each branch to one rendition. Only used when video is
-/// being re-encoded.
+/// Construct the `-filter_complex` argument that optionally tonemaps
+/// HDR→SDR, optionally burns a subtitle stream into the video, then
+/// splits the result N ways and scales each branch to one rendition.
+/// Only used when video is being re-encoded.
+///
+/// Filter ordering, when both tonemap and burn-in apply:
+///
+/// ```text
+/// [0:v]<tonemap>[tm];[tm][0:N]overlay[base];[base]split=N[s0]...
+/// ```
+///
+/// Tonemap runs **before** the subtitle overlay so the burnt-in
+/// pixels composite onto already-SDR video. Compositing first and
+/// then tonemapping would dim the subtitle's white-on-black bitmap
+/// into a washed-out gray.
 fn build_filter_complex(
     accel: HwAccel,
     burn_in_sub: Option<i64>,
+    tonemap: TonemapConfig,
     renditions: &[Rendition],
 ) -> String {
     let n = renditions.len();
-
-    // With burn-in: overlay first, then split the composited frame.
-    // Without burn-in: split the raw video stream directly. The label
-    // we feed into split is `[base]` either way.
     let mut graph = String::new();
-    let split_input = match burn_in_sub {
-        Some(stream_index) => {
-            // ffmpeg auto-converts PGS/VOBSUB bitmap streams into a
-            // video-overlay-compatible source when used as overlay's
-            // second input. We use absolute stream indexing so it's
-            // unambiguous even with multiple subtitle tracks.
-            graph.push_str(&format!("[0:v][0:{stream_index}]overlay[base];"));
-            "[base]"
-        }
-        None => "[0:v]",
+
+    // Stage 1: optional tonemap. Output label `[tm]` only when we
+    // actually emit a chain; otherwise downstream stages read from
+    // `[0:v]` directly.
+    let post_tonemap = if tonemap.apply {
+        let chain = accel.tonemap_prefilter(tonemap);
+        graph.push_str(&format!("[0:v]{chain}[tm];"));
+        "[tm]"
+    } else {
+        "[0:v]"
     };
 
+    // Stage 2: optional subtitle overlay. PGS/VOBSUB bitmap streams
+    // auto-convert when used as overlay's second input; absolute
+    // stream indexing keeps multi-track files unambiguous.
+    let split_input: String = match burn_in_sub {
+        Some(stream_index) => {
+            graph.push_str(&format!("{post_tonemap}[0:{stream_index}]overlay[base];"));
+            "[base]".to_string()
+        }
+        None => post_tonemap.to_string(),
+    };
+
+    // Stage 3: per-rendition scale, fanned out by `split` when n > 1.
     if n == 1 {
-        // No fan-out needed for a single rendition.
         graph.push_str(&format!(
             "{split_input}{}[v0]",
             accel.scale_filter(&renditions[0])
@@ -643,11 +688,9 @@ fn build_filter_complex(
         return graph;
     }
 
-    // <input>split=N[s0][s1]...
     let split_labels: String = (0..n).map(|i| format!("[s{i}]")).collect();
     graph.push_str(&format!("{split_input}split={n}{split_labels}"));
 
-    // ; [s0]scale=...[v0]; [s1]scale=...[v1]; ...
     for (i, rendition) in renditions.iter().enumerate() {
         graph.push(';');
         graph.push_str(&format!("[s{i}]{}[v{i}]", accel.scale_filter(rendition)));
@@ -758,6 +801,7 @@ pub fn build_variant_playlist(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hwaccel::TonemapAlgorithm;
 
     #[test]
     fn session_key_discriminates_movie_from_episode_with_same_uuid() {
@@ -852,5 +896,54 @@ mod tests {
         assert!(p.contains("720p"));
         assert!(!p.contains("480p"));
         assert!(!p.contains("1080p"));
+    }
+
+    #[test]
+    fn filter_complex_without_tonemap_omits_zscale() {
+        let graph = build_filter_complex(
+            HwAccel::Cpu,
+            None,
+            TonemapConfig::default(),
+            crate::ABR_LADDER,
+        );
+        assert!(!graph.contains("zscale"));
+        assert!(!graph.contains("tonemap="));
+        assert!(graph.starts_with("[0:v]split="));
+    }
+
+    #[test]
+    fn filter_complex_with_tonemap_places_tonemap_before_split() {
+        let cfg = TonemapConfig {
+            apply: true,
+            algorithm: TonemapAlgorithm::Hable,
+        };
+        let graph = build_filter_complex(HwAccel::Cpu, None, cfg, crate::ABR_LADDER);
+        // [0:v]<tonemap>[tm];[tm]split=...
+        assert!(graph.starts_with("[0:v]zscale"));
+        assert!(graph.contains("tonemap=tonemap=hable"));
+        let tm_idx = graph.find("[tm];").expect("tonemap output label");
+        let split_idx = graph.find("split=").expect("split present");
+        assert!(
+            tm_idx < split_idx,
+            "tonemap must come before the rendition fan-out"
+        );
+    }
+
+    #[test]
+    fn filter_complex_tonemap_runs_before_subtitle_overlay() {
+        // Tonemap-then-overlay is the right order: compositing a
+        // white-on-black bitmap onto an HDR frame and then tonemapping
+        // would dim the subtitle into washed-out gray.
+        let cfg = TonemapConfig {
+            apply: true,
+            algorithm: TonemapAlgorithm::Hable,
+        };
+        let graph = build_filter_complex(HwAccel::Cpu, Some(3), cfg, crate::ABR_LADDER);
+        let tonemap_idx = graph.find("tonemap=").expect("tonemap present");
+        let overlay_idx = graph.find("overlay").expect("overlay present");
+        assert!(
+            tonemap_idx < overlay_idx,
+            "tonemap must run before subtitle overlay"
+        );
     }
 }

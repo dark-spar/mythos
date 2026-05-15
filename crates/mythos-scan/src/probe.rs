@@ -67,6 +67,9 @@ struct Stream {
     codec_name: Option<String>,
     width: Option<i64>,
     height: Option<i64>,
+    color_primaries: Option<String>,
+    color_transfer: Option<String>,
+    color_space: Option<String>,
     #[serde(default)]
     tags: StreamTags,
     #[serde(default)]
@@ -138,6 +141,9 @@ impl FfProbeOutput {
             duration_seconds,
             width: video.and_then(|s| s.width),
             height: video.and_then(|s| s.height),
+            color_primaries: video.and_then(|s| s.color_primaries.clone()),
+            color_transfer: video.and_then(|s| s.color_transfer.clone()),
+            color_space: video.and_then(|s| s.color_space.clone()),
             subtitles,
         }
     }

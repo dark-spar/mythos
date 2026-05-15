@@ -2,6 +2,15 @@ import { apiGet, apiPut } from './api';
 
 export type TmdbSource = 'env' | 'db' | 'none';
 
+export type TonemapAlgorithm = 'hable' | 'mobius' | 'reinhard' | 'bt2390';
+
+export const TONEMAP_ALGORITHMS: readonly TonemapAlgorithm[] = [
+	'hable',
+	'mobius',
+	'reinhard',
+	'bt2390'
+] as const;
+
 export interface Settings {
 	tmdb: {
 		configured: boolean;
@@ -11,10 +20,16 @@ export interface Settings {
 		/// is intentionally never mirrored back here.
 		value: string | null;
 	};
+	tonemap: {
+		enabled: boolean;
+		algorithm: TonemapAlgorithm;
+	};
 }
 
 export interface SettingsUpdate {
 	tmdb_api_key?: string;
+	tonemap_enabled?: boolean;
+	tonemap_algorithm?: TonemapAlgorithm;
 }
 
 export const getSettings = (): Promise<Settings> => apiGet('/api/settings');

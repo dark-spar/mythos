@@ -54,4 +54,12 @@ impl SettingsRepo {
 /// configurable from the UI.
 pub mod keys {
     pub const TMDB_API_KEY: &str = "tmdb_api_key";
+    /// `"true"` / `"false"`. Missing row defaults to enabled — HDR
+    /// content otherwise looks washed out when transcoded to SDR,
+    /// which is the surprising result and the bad default.
+    pub const TONEMAP_ENABLED: &str = "tonemap_enabled";
+    /// One of `hable` / `mobius` / `reinhard` / `bt2390`. Anything
+    /// else falls back to the default. See
+    /// `mythos_stream::TonemapAlgorithm`.
+    pub const TONEMAP_ALGORITHM: &str = "tonemap_algorithm";
 }
